@@ -21,7 +21,7 @@ import requests
 from flask import Flask, request, jsonify, Response, send_from_directory
 
 # ------------------------------------------------------------------
-#  CONFIG (from environment — nothing secret is hard-coded)
+#  CONFIG
 # ------------------------------------------------------------------
 def _env(key, default=""):
     return os.environ.get(key, default).strip()
@@ -127,7 +127,7 @@ def now_str():
     return datetime.now(timezone.utc).strftime("%A, %d %B %Y, %H:%M UTC")
 
 # ------------------------------------------------------------------
-#  AI Streaming (Groq + Gemini)
+#  AI Streaming
 # ------------------------------------------------------------------
 def groq_stream(model_name, messages, key):
     cfg = MODELS.get(model_name, MODELS["UB Flash 3.5"])
@@ -135,7 +135,9 @@ def groq_stream(model_name, messages, key):
     if cfg.get("effort"): payload["reasoning_effort"] = cfg["effort"]
     if cfg.get("tokens"): payload["max_completion_tokens"] = cfg["tokens"]
 
-    r = requests.post(f"{GROQ_API}/chat/completions", headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"}, json=payload, stream=True, timeout=30)
+    r = requests.post(f"{GROQ_API}/chat/completions",
+                      headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+                      json=payload, stream=True, timeout=30)
     if r.status_code != 200: raise RuntimeError(err_text(r.text))
 
     for line in r.iter_lines(decode_unicode=True):
@@ -176,7 +178,9 @@ def gemini_stream(model_name, contents, key):
         "contents": contents,
         "generationConfig": {"thinkingConfig": {"thinkingLevel": think}},
     }
-    r = requests.post(f"{GEMINI_API}/gemini-3.5-flash:streamGenerateContent?alt=sse", headers={"Content-Type": "application/json", "x-goog-api-key": key}, json=body, stream=True, timeout=45)
+    r = requests.post(f"{GEMINI_API}/gemini-3.5-flash:streamGenerateContent?alt=sse",
+                      headers={"Content-Type": "application/json", "x-goog-api-key": key},
+                      json=body, stream=True, timeout=45)
     if r.status_code != 200: raise RuntimeError(err_text(r.text))
     for line in r.iter_lines(decode_unicode=True):
         if not line or not line.startswith("data:"): continue
@@ -188,7 +192,7 @@ def gemini_stream(model_name, contents, key):
         except Exception: continue
 
 # ------------------------------------------------------------------
-#  Search (Serper)
+#  Search
 # ------------------------------------------------------------------
 _search_cache = {}
 _search_lock  = threading.Lock()
@@ -202,7 +206,9 @@ def serper_search(query, num=6):
     last = "Search unavailable"
     for k in SEARCH_KEYS:
         try:
-            r = requests.post(f"{SERPER_API}/search", headers={"X-API-KEY": k, "Content-Type": "application/json"}, json={"q": query, "num": num}, timeout=12)
+            r = requests.post(f"{SERPER_API}/search",
+                              headers={"X-API-KEY": k, "Content-Type": "application/json"},
+                              json={"q": query, "num": num}, timeout=12)
             if r.status_code == 200:
                 data = r.json()
                 with _search_lock: _search_cache[ck] = (time.time(), data)
@@ -216,7 +222,9 @@ def serper_images(query, num=9):
     last = "Search unavailable"
     for k in SEARCH_KEYS:
         try:
-            r = requests.post(f"{SERPER_API}/images", headers={"X-API-KEY": k, "Content-Type": "application/json"}, json={"q": query, "num": num}, timeout=12)
+            r = requests.post(f"{SERPER_API}/images",
+                              headers={"X-API-KEY": k, "Content-Type": "application/json"},
+                              json={"q": query, "num": num}, timeout=12)
             if r.status_code == 200: return r.json()
             last = f"Images HTTP {r.status_code}"
         except Exception as e: last = str(e)
@@ -231,14 +239,18 @@ def web_context(d):
     return ("\n\n[LIVE WEB RESULTS from Google. Answer the question above using them. Be concise.]\n" + "\n".join(parts))
 
 # ------------------------------------------------------------------
-#  Live Data (Weather + Crypto)
+#  Weather + Crypto
 # ------------------------------------------------------------------
 def weather(city):
-    g = requests.get("https://geocoding-api.open-meteo.com/v1/search", params={"count": 1, "name": city}, timeout=10).json()
+    g = requests.get("https://geocoding-api.open-meteo.com/v1/search",
+                     params={"count": 1, "name": city}, timeout=10).json()
     p = (g.get("results") or [None])[0]
     if not p: raise RuntimeError("City not found: " + city)
-    w = requests.get("https://api.open-meteo.com/v1/forecast", params={"latitude": p["latitude"], "longitude": p["longitude"], "current": "temperature_2m,wind_speed_10m,weather_code"}, timeout=10).json()["current"]
-    return {"name": p["name"] + (", " + p["country"] if p.get("country") else ""), "t": w["temperature_2m"], "w": w["wind_speed_10m"], "s": _wx_text(w["weather_code"])}
+    w = requests.get("https://api.open-meteo.com/v1/forecast",
+                     params={"latitude": p["latitude"], "longitude": p["longitude"],
+                             "current": "temperature_2m,wind_speed_10m,weather_code"}, timeout=10).json()["current"]
+    return {"name": p["name"] + (", " + p["country"] if p.get("country") else ""),
+            "t": w["temperature_2m"], "w": w["wind_speed_10m"], "s": _wx_text(w["weather_code"])}
 
 def _wx_text(code):
     if code == 0: return "Clear sky"
@@ -251,33 +263,42 @@ def _wx_text(code):
     if code < 95: return "Snow showers"
     return "Thunderstorm"
 
-COINS = {"bitcoin": ["Bitcoin", "btc"], "ethereum": ["Ethereum", "eth"], "solana": ["Solana", "sol"], "dogecoin": ["Dogecoin", "doge"], "ripple": ["XRP", "xrp"]}
+COINS = {"bitcoin": ["Bitcoin", "btc"], "ethereum": ["Ethereum", "eth"], "solana": ["Solana", "sol"],
+         "dogecoin": ["Dogecoin", "doge"], "ripple": ["XRP", "xrp"]}
 
 def crypto_prices(ids):
-    r = requests.get("https://api.coingecko.com/api/v3/simple/price", params={"vs_currencies": "inr,usd", "include_24hr_change": "true", "ids": ",".join(ids)}, timeout=12)
+    r = requests.get("https://api.coingecko.com/api/v3/simple/price",
+                     params={"vs_currencies": "inr,usd", "include_24hr_change": "true", "ids": ",".join(ids)},
+                     timeout=12)
     if r.status_code != 200: raise RuntimeError("Price service busy")
     d = r.json()
-    return [{"name": COINS[i][0], "inr": d[i]["inr"], "usd": d[i]["usd"], "chg": d[i].get("inr_24h_change")} for i in ids if i in d]
+    return [{"name": COINS[i][0], "inr": d[i]["inr"], "usd": d[i]["usd"], "chg": d[i].get("inr_24h_change")}
+            for i in ids if i in d]
 
 # ------------------------------------------------------------------
 #  Image Gen
 # ------------------------------------------------------------------
 def make_image(prompt):
     if not BACKUP_KEYS: raise RuntimeError("Image making not set up")
-    body = {"contents": [{"role": "user", "parts": [{"text": "Create an image: " + prompt}]}], "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]}}
+    body = {"contents": [{"role": "user", "parts": [{"text": "Create an image: " + prompt}]}],
+            "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]}}
     last_err = "Image generation failed"
     start = int(time.time()) % len(BACKUP_KEYS)
     for mod in IMAGE_MODELS:
         for i in range(min(len(BACKUP_KEYS), 8)):
             k = BACKUP_KEYS[(start + i) % len(BACKUP_KEYS)]
             try:
-                r = requests.post(f"{GEMINI_API}/{mod}:generateContent", headers={"Content-Type": "application/json", "x-goog-api-key": k}, json=body, timeout=45)
-                if r.status_code != 200: last_err = err_text(r.text); continue
+                r = requests.post(f"{GEMINI_API}/{mod}:generateContent",
+                                  headers={"Content-Type": "application/json", "x-goog-api-key": k},
+                                  json=body, timeout=45)
+                if r.status_code != 200:
+                    last_err = err_text(r.text); continue
                 j = r.json()
                 parts = ((j.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
                 for p in parts:
                     d = p.get("inlineData") or p.get("inline_data")
-                    if d: return "data:" + (d.get("mimeType") or d.get("mime_type") or "image/png") + ";base64," + d["data"]
+                    if d:
+                        return "data:" + (d.get("mimeType") or d.get("mime_type") or "image/png") + ";base64," + d["data"]
             except Exception as e: last_err = str(e)
     raise RuntimeError(last_err)
 
@@ -345,13 +366,15 @@ def chat():
         try:
             d = weather(r["q"]) if r["q"] else None
             if not d: return jsonify({"error": "Ask like: weather in Delhi"}), 400
-            return jsonify({"kind": "weather", "data": d, "text": f"[Live weather] {d['name']}: {d['t']}°C, {d['s']}, wind {d['w']} km/h."})
+            return jsonify({"kind": "weather", "data": d,
+                            "text": f"[Live weather] {d['name']}: {d['t']}°C, {d['s']}, wind {d['w']} km/h."})
         except Exception as e: return jsonify({"error": str(e)}), 502
 
     if r["k"] == "cx":
         try:
             prices = crypto_prices(r["ids"])
-            return jsonify({"kind": "crypto", "data": prices, "text": "[Live crypto] " + "; ".join(f"{p['name']}: ₹{p['inr']} / ${p['usd']}" for p in prices)})
+            return jsonify({"kind": "crypto", "data": prices,
+                            "text": "[Live crypto] " + "; ".join(f"{p['name']}: ₹{p['inr']} / ${p['usd']}" for p in prices)})
         except Exception as e: return jsonify({"error": str(e)}), 502
 
     if r["k"] == "gen":
@@ -363,7 +386,10 @@ def chat():
     if r["k"] == "img":
         try:
             d = serper_images(r["q"], r["n"])
-            images = [{"url": x.get("imageUrl") or x.get("link"), "thumb": x.get("thumbnailUrl") or x.get("imageUrl"), "title": x.get("title") or "image", "link": x.get("link")} for x in (d.get("images") or [])[:r["n"]]]
+            images = [{"url": x.get("imageUrl") or x.get("link"),
+                       "thumb": x.get("thumbnailUrl") or x.get("imageUrl"),
+                       "title": x.get("title") or "image",
+                       "link": x.get("link")} for x in (d.get("images") or [])[:r["n"]]]
             return jsonify({"kind": "images", "images": images, "text": f'[Image results for "{r["q"]}"]'})
         except Exception as e: return jsonify({"error": str(e)}), 502
 
@@ -375,7 +401,9 @@ def chat():
             sources = [o.get("link") for o in (d.get("organic") or [])[:4]]
         except Exception: pass
 
-    messages = build_messages(model_name, history + [{"role": "user", "content": text or "Summarise this file."}], ctx=ctx, attachment=attachment_text)
+    messages = build_messages(model_name,
+                              history + [{"role": "user", "content": text or "Summarise this file."}],
+                              ctx=ctx, attachment=attachment_text)
 
     def generate():
         yield sse({"type": "sources", "sources": sources})
@@ -387,7 +415,8 @@ def chat():
         except Exception as e: print("Primary failed:", e)
 
         if BACKUP_KEYS:
-            contents = [{"role": "user" if m["role"] == "user" else "model", "parts": [{"text": m["content"]}]} for m in messages[1:]]
+            contents = [{"role": "user" if m["role"] == "user" else "model",
+                         "parts": [{"text": m["content"]}]} for m in messages[1:]]
             start = int(time.time()) % len(BACKUP_KEYS)
             for i in range(min(len(BACKUP_KEYS), 6)):
                 try:
@@ -422,14 +451,19 @@ def transcribe():
     if not f: return jsonify({"error": "No audio"}), 400
     lang = request.form.get("language", "en")[:2]
     files = {"file": (f.filename or "voice.webm", f.read(), f.mimetype or "audio/webm")}
-    r = requests.post(f"{GROQ_API}/audio/transcriptions", headers={"Authorization": f"Bearer {key}"}, files=files, data={"model": WHISPER_MODEL, "language": lang}, timeout=60)
+    r = requests.post(f"{GROQ_API}/audio/transcriptions",
+                      headers={"Authorization": f"Bearer {key}"},
+                      files=files, data={"model": WHISPER_MODEL, "language": lang}, timeout=60)
     if r.status_code != 200: return jsonify({"error": err_text(r.text)}), 502
     return jsonify({"text": (r.json().get("text") or "").strip()})
 
 # ------------------------------------------------------------------
 #  File upload
 # ------------------------------------------------------------------
-TEXT_EXT = re.compile(r"\.(txt|md|json|csv|tsv|js|jsx|ts|tsx|py|html?|css|scss|java|kt|c|h|cpp|hpp|cs|go|rs|php|rb|sh|bat|ya?ml|xml|sql|swift|dart|lua|r|toml|ini|env|gradle|vue|svelte|log)$", re.I)
+TEXT_EXT = re.compile(
+    r"\.(txt|md|json|csv|tsv|js|jsx|ts|tsx|py|html?|css|scss|java|kt|c|h|cpp|hpp|cs|go|rs|php|rb|sh|bat|ya?ml|xml|sql|swift|dart|lua|r|toml|ini|env|gradle|vue|svelte|log)$",
+    re.I,
+)
 
 @app.route("/api/upload", methods=["POST"])
 @rate_guard
@@ -438,15 +472,15 @@ def upload():
     if not f: return jsonify({"error": "No file"}), 400
     raw = f.read()
     if len(raw) > 12 * 1024 * 1024: return jsonify({"error": "File too large (max 12 MB)"}), 413
-
     name = f.filename or "file"
     mime = f.mimetype or ""
-
     try:
         if mime == "application/pdf" or name.lower().endswith(".pdf"):
-            return jsonify({"name": name, "mime": "application/pdf", "text": f"[PDF: {name}]", "base64": base64.b64encode(raw).decode()})
+            return jsonify({"name": name, "mime": "application/pdf",
+                            "text": f"[PDF: {name}]", "base64": base64.b64encode(raw).decode()})
         if mime.startswith("image/"):
-            return jsonify({"name": name, "mime": mime, "text": f"[Image: {name}]", "base64": base64.b64encode(raw).decode()})
+            return jsonify({"name": name, "mime": mime,
+                            "text": f"[Image: {name}]", "base64": base64.b64encode(raw).decode()})
         if name.lower().endswith(".zip") or "zip" in mime:
             zf = zipfile.ZipFile(io.BytesIO(raw))
             skip = re.compile(r"(^|/)(node_modules|\.git|dist|build|__pycache__|\.idea|\.vscode)/", re.I)
@@ -464,452 +498,358 @@ def upload():
         if TEXT_EXT.search(name) or mime.startswith("text/") or mime == "application/json":
             txt = raw.decode("utf-8", "ignore")[:60000]
             return jsonify({"name": name, "mime": "text/plain", "text": f"[File: {name}]\n{txt}"})
-    except Exception as e: return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
     return jsonify({"error": "Unsupported file."}), 415
 
 # ------------------------------------------------------------------
-#  Frontend
+#  Frontend HTML
+#  Built as a list of lines joined with newlines — avoids the fragile
+#  triple-quoted raw string that was getting corrupted.
 # ------------------------------------------------------------------
-INDEX_HTML = r"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
-<meta name="theme-color" content="#3b6cf6">
-<title>UB Chat</title>
-<link rel="icon" type="image/png" href="/logo.png">
-<link rel="apple-touch-icon" href="/logo.png">
-<meta property="og:image" content="/logo.png">
-<meta property="og:title" content="UB Chat">
-<meta property="og:description" content="Fast AI chat. Your chats stay on your device.">
-<!-- highlight.js for code visualization -->
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-<style>
-*{box-sizing:border-box;margin:0}
-:root{color-scheme:light;--bg:#f5f6fa;--card:#fff;--tx:#141b34;--mu:#6b7280;--bd:#e6e8ef;--ac:#3b6cf6;--ac2:#ff6b00;--sh:0 2px 10px rgba(20,27,52,.06);--code-bg:#1e1e2e}
-:root[data-theme=dark]{color-scheme:dark;--bg:#0f1115;--card:#181b22;--tx:#e8eaf0;--mu:#8b93a3;--bd:#262a33;--ac:#6c8cff;--ac2:#ff8c1a;--sh:none;--code-bg:#0d1117}
-html,body{height:100%}
-body{background:var(--bg);color:var(--tx);font:16px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden;display:flex;height:100%}
-button,select,textarea,input{font:inherit;color:inherit}
-button{cursor:pointer;border:0;background:none}
-#side{width:270px;background:var(--card);display:flex;flex-direction:column;padding:12px;gap:4px;border-right:1px solid var(--bd)}
-.brand{display:flex;align-items:center;gap:10px;padding:6px 8px 12px;border-bottom:1px solid var(--bd);margin-bottom:6px}
-.brand img{width:36px;height:36px;object-fit:contain}
-.brand b{font-size:16px}
-.new{padding:11px 14px;border-radius:14px;text-align:left;font-weight:700;background:var(--ac);color:#fff;margin-bottom:6px}
-#list{flex:1;overflow:auto;display:flex;flex-direction:column;gap:2px}
-.ci{display:flex;align-items:center;border-radius:10px;padding:1px 4px 1px 10px}
-.ci.on,.ci:hover{background:var(--bg)}
-.ci span{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;padding:8px 0;cursor:pointer;font-size:15px}
-.ci button{color:var(--mu);padding:6px 9px;font-size:18px}
-#main{flex:1;display:flex;flex-direction:column;min-width:0}
-#top{display:flex;align-items:center;gap:8px;padding:10px 12px;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(10px);z-index:10}
-#model{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:8px 12px;font-weight:700}
-#msgs{flex:1;overflow:auto;padding:4px 14px 20px}
-.w{max-width:780px;margin:0 auto}
-.m{margin:16px 0;display:flex;gap:10px}
-.m.u{justify-content:flex-end}
-.m.u .b{background:linear-gradient(135deg,var(--ac),#6c8cff);color:#fff;padding:10px 16px;border-radius:20px 20px 6px 20px;max-width:85%;white-space:pre-wrap}
-.av{width:34px;height:34px;border-radius:10px;flex:none;background:var(--card);border:1px solid var(--bd);display:flex;align-items:center;justify-content:center;overflow:hidden}
-.av img{width:100%;height:100%;object-fit:contain;padding:2px}
-.m.a .b{flex:1;min-width:0;overflow-wrap:anywhere}
-.b code{background:var(--bg);padding:1px 6px;border-radius:6px;font:.88em ui-monospace,monospace}
-.b a{color:var(--ac);text-decoration:none}
-.b a:hover{text-decoration:underline}
+HTML_LINES = [
+'<!DOCTYPE html>',
+'<html lang="en">',
+'<head>',
+'<meta charset="utf-8">',
+'<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">',
+'<meta name="theme-color" content="#3b6cf6">',
+'<title>UB Chat</title>',
+'<link rel="icon" type="image/png" href="/logo.png">',
+'<link rel="apple-touch-icon" href="/logo.png">',
+'<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">',
+'<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>',
+'<style>',
+'*{box-sizing:border-box;margin:0}',
+':root{color-scheme:light;--bg:#f5f6fa;--card:#fff;--tx:#141b34;--mu:#6b7280;--bd:#e6e8ef;--ac:#3b6cf6;--ac2:#ff6b00;--sh:0 2px 10px rgba(20,27,52,.06);--code-bg:#1e1e2e}',
+':root[data-theme=dark]{color-scheme:dark;--bg:#0f1115;--card:#181b22;--tx:#e8eaf0;--mu:#8b93a3;--bd:#262a33;--ac:#6c8cff;--ac2:#ff8c1a;--sh:none;--code-bg:#0d1117}',
+'html,body{height:100%}',
+'body{background:var(--bg);color:var(--tx);font:16px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden;display:flex;height:100%}',
+'button,select,textarea,input{font:inherit;color:inherit}',
+'button{cursor:pointer;border:0;background:none}',
+'#side{width:270px;background:var(--card);display:flex;flex-direction:column;padding:12px;gap:4px;border-right:1px solid var(--bd)}',
+'.brand{display:flex;align-items:center;gap:10px;padding:6px 8px 12px;border-bottom:1px solid var(--bd);margin-bottom:6px}',
+'.brand img{width:36px;height:36px;object-fit:contain}',
+'.brand b{font-size:16px}',
+'.new{padding:11px 14px;border-radius:14px;text-align:left;font-weight:700;background:var(--ac);color:#fff;margin-bottom:6px}',
+'#list{flex:1;overflow:auto;display:flex;flex-direction:column;gap:2px}',
+'.ci{display:flex;align-items:center;border-radius:10px;padding:1px 4px 1px 10px}',
+'.ci.on,.ci:hover{background:var(--bg)}',
+'.ci span{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;padding:8px 0;cursor:pointer;font-size:15px}',
+'.ci button{color:var(--mu);padding:6px 9px;font-size:18px}',
+'#main{flex:1;display:flex;flex-direction:column;min-width:0}',
+'#top{display:flex;align-items:center;gap:8px;padding:10px 12px;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(10px);z-index:10}',
+'#model{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:8px 12px;font-weight:700}',
+'#msgs{flex:1;overflow:auto;padding:4px 14px 20px}',
+'.w{max-width:780px;margin:0 auto}',
+'.m{margin:16px 0;display:flex;gap:10px}',
+'.m.u{justify-content:flex-end}',
+'.m.u .b{background:linear-gradient(135deg,var(--ac),#6c8cff);color:#fff;padding:10px 16px;border-radius:20px 20px 6px 20px;max-width:85%;white-space:pre-wrap}',
+'.av{width:34px;height:34px;border-radius:10px;flex:none;background:var(--card);border:1px solid var(--bd);display:flex;align-items:center;justify-content:center;overflow:hidden}',
+'.av img{width:100%;height:100%;object-fit:contain;padding:2px}',
+'.m.a .b{flex:1;min-width:0;overflow-wrap:anywhere}',
+'.b code{background:var(--bg);padding:1px 6px;border-radius:6px;font:.88em ui-monospace,monospace}',
+'.b a{color:var(--ac);text-decoration:none}',
+'.b a:hover{text-decoration:underline}',
+'.code{background:var(--code-bg);border-radius:14px;margin:12px 0;overflow:hidden;border:1px solid #333;box-shadow:0 4px 12px rgba(0,0,0,.2)}',
+'.ch{display:flex;justify-content:space-between;align-items:center;padding:8px 14px;background:#2d2d3f;color:#aaa;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}',
+'.ch span{display:flex;align-items:center;gap:6px}',
+'.ch .lang-dot{width:8px;height:8px;border-radius:50%;background:#f1fa8c}',
+'.ch .btns{display:flex;gap:8px}',
+'.ch button{color:#ccc;font-size:12px;padding:2px 8px;border-radius:6px;transition:background .15s}',
+'.ch button:hover{background:#444;color:#fff}',
+'.ch button.preview{color:#8be9fd}',
+'.ch button.preview:hover{background:#8be9fd;color:#000}',
+'.code pre{padding:14px 16px;overflow-x:auto;margin:0;font:13.5px/1.6 ui-monospace,Menlo,Consolas,monospace;color:#f8f8f2;background:var(--code-bg)}',
+'.code pre code{background:none;padding:0;font:inherit;color:inherit}',
+'.card{background:var(--card);border-radius:16px;padding:14px 16px;box-shadow:var(--sh);margin:8px 0}',
+'.card .big{font-size:34px;font-weight:700}',
+'.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin:12px 0}',
+'.gi{position:relative;border-radius:14px;overflow:hidden;background:var(--bd);display:block;color:inherit;text-decoration:none;box-shadow:0 2px 6px rgba(0,0,0,.1);transition:transform .15s}',
+'.gi:hover{transform:scale(1.02)}',
+'.gi img{width:100%;aspect-ratio:1;object-fit:cover;display:block}',
+'.gi .ttl{display:block;padding:8px;background:var(--card);font-size:12px;line-height:1.3;max-height:44px;overflow:hidden}',
+'.lgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:10px 0}',
+'.lcard{display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--card);border:1px solid var(--bd);border-radius:12px;text-decoration:none;color:inherit;min-width:0;transition:box-shadow .15s,transform .1s}',
+'.lcard:hover{box-shadow:var(--sh);transform:translateY(-1px)}',
+'.lcard img{width:20px;height:20px;flex:none;border-radius:4px;background:var(--bg)}',
+'.lcard span{flex:1;min-width:0;font-size:13.5px;line-height:1.35;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}',
+'.lcard small{display:block;color:var(--mu);font-size:11px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+'#bar{padding:4px 12px 12px}',
+'#box{max-width:780px;margin:0 auto;display:flex;align-items:flex-end;gap:8px;background:var(--card);border-radius:26px;padding:8px;box-shadow:0 4px 18px rgba(20,27,52,.1);border:1px solid var(--bd)}',
+'#in{flex:1;border:0;background:none;outline:0;resize:none;max-height:180px;padding:8px 0;line-height:1.5}',
+'#go{width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,var(--ac),#6c8cff);color:#fff;font-size:19px;flex:none;display:flex;align-items:center;justify-content:center}',
+'#go:active{transform:scale(.92)}',
+'#empty{text-align:center;margin-top:6vh}',
+'#empty img{width:130px;height:130px;object-fit:contain}',
+'#empty h1{font-size:28px;font-weight:800}',
+'#empty h1 span{background:linear-gradient(90deg,var(--ac2),var(--ac),#138808);-webkit-background-clip:text;background-clip:text;color:transparent}',
+'#empty p{color:var(--mu);margin:4px 0 18px}',
+'.chip{display:inline-block;background:var(--card);border:1px solid var(--bd);border-radius:20px;padding:6px 14px;font-size:14px;margin:4px 6px 4px 0}',
+'#toast{position:fixed;left:50%;bottom:96px;transform:translateX(-50%);background:var(--tx);color:var(--bg);padding:9px 16px;border-radius:12px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:60}',
+'#toast.on{opacity:1}',
+'#preview{position:fixed;inset:0;background:rgba(0,0,0,.8);display:none;z-index:100;flex-direction:column}',
+'#preview.on{display:flex}',
+'#preview-bar{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:var(--card);border-bottom:1px solid var(--bd);color:var(--tx)}',
+'#preview-bar b{font-size:15px}',
+'#preview-bar button{color:var(--tx);font-size:14px;padding:6px 12px;border-radius:8px}',
+'#preview-bar button:hover{background:var(--bg)}',
+'#preview iframe{flex:1;border:0;background:#fff;width:100%;height:100%}',
+'@media(max-width:800px){#side{display:none}.m.a .b{font-size:16px}}',
+'@media(max-width:520px){.lgrid{grid-template-columns:1fr}}',
+'</style>',
+'</head>',
+'<body>',
+'<aside id="side">',
+'  <div class="brand"><img src="/logo.png" alt="UB Chat"><b>UB Chat</b></div>',
+'  <button class="new" id="new">+ New chat</button>',
+'  <div id="list"></div>',
+'</aside>',
+'<section id="main">',
+'  <header id="top">',
+'    <select id="model"></select>',
+'    <span style="flex:1;text-align:right;color:var(--mu);font-size:13px" id="clock"></span>',
+'  </header>',
+'  <div id="msgs"><div class="w" id="w"></div></div>',
+'  <div id="bar">',
+'    <div id="ab" style="max-width:780px;margin:0 auto"></div>',
+'    <input type="file" id="fi" hidden accept="image/*,application/pdf,.pdf,.zip,text/*,.md,.json,.csv,.js,.ts,.py,.html,.css,.php">',
+'    <div id="box">',
+'      <button id="att" class="chip" style="padding:8px 10px;margin:0">📎</button>',
+'      <textarea id="in" rows="1" placeholder="Ask UB Chat anything"></textarea>',
+'      <button id="mic" class="chip" style="padding:8px 10px;margin:0">🎙️</button>',
+'      <button id="go" aria-label="Send">↑</button>',
+'    </div>',
+'  </div>',
+'</section>',
+'<div id="toast"></div>',
+'<div id="preview">',
+'  <div id="preview-bar">',
+'    <b>Live Preview</b>',
+'    <div style="display:flex;gap:6px">',
+'      <button id="pv-reload">Reload</button>',
+'      <button id="pv-close" style="font-weight:700">Close ✕</button>',
+'    </div>',
+'  </div>',
+'  <iframe id="pv-frame" sandbox="allow-scripts allow-modals allow-forms allow-popups allow-same-origin"></iframe>',
+'</div>',
+'<script>',
+'const $=id=>document.getElementById(id);',
+'const LS={g(k,d){try{const v=JSON.parse(localStorage.getItem(k));return v==null?d:v}catch(e){return d}},s(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};',
+'const E=s=>String(s==null?"":s).replace(/[&<>"\\x27]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",\'"\':"&quot;","\\x27":"&#39;"}[c]));',
+'const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);',
+'function toast(t){const el=$("toast");el.textContent=t;el.classList.add("on");clearTimeout(toast._t);toast._t=setTimeout(()=>el.classList.remove("on"),2500)}',
+'let chats=LS.g("ub_chats",[]),cur=null,busy=false,ctl=null,pend=null,rec=null;',
+'const MODELS=["UB Quick Flash 2.4","UB Flash 3.5","UB Flash 3.8"];',
+'MODELS.forEach(n=>$("model").add(new Option(n,n)));',
+'$("model").value=LS.g("ub_model",MODELS[1]);',
+'$("model").onchange=()=>LS.s("ub_model",$("model").value);',
+'const getChat=()=>chats.find(c=>c.id===cur);',
+'const save=()=>LS.s("ub_chats",chats);',
+'const URL_RE=/\\[([^\\]\\n]+)\\]\\((https?:\\/\\/[^)\\s]+)\\)|(https?:\\/\\/[^\\s<>)"\\x27]+)/g;',
+'function linkGrid(raw){',
+'  const seen=new Set();const items=[];let m;URL_RE.lastIndex=0;',
+'  while((m=URL_RE.exec(raw))!==null){',
+'    const title=(m[1]||"").trim();',
+'    const url=(m[2]||m[3]||"").trim();',
+'    if(!url||seen.has(url))continue;',
+'    seen.add(url);',
+'    let domain="";try{domain=new URL(url).hostname.replace(/^www\\./,"")}catch(e){}',
+'    items.push({title:title||domain||url,url,domain});',
+'  }',
+'  if(!items.length)return "";',
+'  const cards=items.map(it=>{',
+'    const fav="https://www.google.com/s2/favicons?domain="+encodeURIComponent(it.domain)+"&sz=32";',
+'    return \'<a class="lcard" href="\'+E(it.url)+\'" target="_blank" rel="noopener"><img src="\'+fav+\'" alt="" loading="lazy" onerror="this.style.display=\\\'none\\\'"><span>\'+E(it.title)+\'<small>\'+E(it.domain)+\'</small></span></a>\';',
+'  }).join("");',
+'  return \'<div class="lgrid">\'+cards+\'</div>\';',
+'}',
+'window.__codeBlocks=[];',
+'function md(t){',
+'  t=t.replace(/^([A-Za-z0-9][^\\n\\]]{1,120})\\]\\((https?:\\/\\/[^)\\s]+)\\)/gm,"[$1]($2)");',
+'  const escaped=E(t);',
+'  const blocks=[];',
+'  const withPlaceholders=escaped.replace(/```(\\w*)\\n?([\\s\\S]*?)```/g,(m,lang,code)=>{',
+'    const idx=blocks.length;',
+'    blocks.push({lang:lang||"code",code:code.trim()});',
+'    window.__codeBlocks.push({lang:lang||"code",code:code.trim()});',
+'    return "\\n\\n@@CODE_BLOCK_"+idx+"@@\\n\\n";',
+'  });',
+'  let html=withPlaceholders',
+'    .replace(/\\[([^\\]\\n]+)\\]\\((https?:\\/\\/[^)\\s]+)\\)/g,(m,txt,url)=>\'<a href="\'+url+\'" target="_blank" rel="noopener">\'+txt+\'</a>\')',
+'    .replace(/\\*\\*([^*\\n]+)\\*\\*/g,"<b>$1</b>")',
+'    .replace(/^### (.*)$/gm,"<h4>$1</h4>")',
+'    .replace(/^#{1,2} (.*)$/gm,"<h3>$1</h3>")',
+'    .replace(/^(?:[-*] .*(?:\\n|$))+/gm,mm=>"<ul>"+mm.trim().split("\\n").map(x=>"<li>"+x.slice(2)+"</li>").join("")+"</ul>")',
+'    .replace(/\\n{2,}/g,"<br><br>").replace(/\\n/g,"<br>");',
+'  html=html.replace(/@@CODE_BLOCK_(\\d+)@@/g,(m,idx)=>{',
+'    const b=blocks[+idx];',
+'    const canPreview=["html","php","css","js","javascript","svg"].includes(b.lang.toLowerCase());',
+'    return \'<div class="code" data-idx="\'+idx+\'"><div class="ch"><span><i class="lang-dot"></i> \'+b.lang+\'</span><div class="btns">\'+(canPreview?\'<button class="preview" data-code-idx="\'+idx+\'" data-lang="\'+b.lang+\'">Preview ▶</button>\':"")+\'<button class="copy" data-code-idx="\'+idx+\'">Copy</button></div></div><pre><code class="language-\'+b.lang+\'">\'+E(b.code)+\'</code></pre></div>\';',
+'  });',
+'  setTimeout(()=>{if(window.hljs)document.querySelectorAll(".code code").forEach(el=>hljs.highlightElement(el))},10);',
+'  return html;',
+'}',
+'function bubble(m){',
+'  if(m.role==="user")return \'<div class="m u"><div class="b">\'+E(m.content)+"</div></div>";',
+'  let body;',
+'  if(m.err){body=\'<span style="color:#e0453b">\'+E(m.content)+"</span>"}',
+'  else{const html=md(m.content||"");const grid=linkGrid(m.content||"");body=html+grid}',
+'  return \'<div class="m a"><i class="av"><img src="/logo.png" alt="UB"></i><div class="b">\'+body+"</div></div>";',
+'}',
+'$("pv-close").onclick=()=>$("preview").classList.remove("on");',
+'$("pv-reload").onclick=()=>{const f=$("pv-frame");f.srcdoc=f.srcdoc};',
+'document.addEventListener("click",e=>{',
+'  if(e.target.classList.contains("copy")){',
+'    const idx=e.target.dataset.codeIdx;',
+'    const block=window.__codeBlocks[idx];',
+'    if(block){navigator.clipboard.writeText(block.code).then(()=>{e.target.textContent="Copied!";setTimeout(()=>e.target.textContent="Copy",1500)}).catch(()=>toast("Copy failed"))}',
+'  }',
+'  if(e.target.classList.contains("preview")){',
+'    const idx=e.target.dataset.codeIdx;',
+'    const lang=(e.target.dataset.lang||"").toLowerCase();',
+'    const block=window.__codeBlocks[idx];',
+'    if(!block)return;',
+'    let htmlContent="";',
+'    const code=block.code;',
+'    if(lang==="html"||lang==="svg"){htmlContent=code}',
+'    else if(lang==="css"){htmlContent=\'<!DOCTYPE html><html><head><style>\'+code+\'</style></head><body><div style="padding:20px;font-family:sans-serif"><h2>CSS Preview</h2><p class="demo">Demo paragraph. Try adding <code>&lt;h1&gt;</code>, <code>&lt;p&gt;</code>, <code>&lt;button&gt;</code> in your CSS.</p><button class="btn">Click Me</button><div class="card"><h3>Card Title</h3><p>Card content here.</p></div></div></body></html>\'}',
+'    else if(lang==="js"||lang==="javascript"){htmlContent=\'<!DOCTYPE html><html><head><style>body{font-family:sans-serif;padding:20px}</style></head><body><h2>JS Preview</h2><pre id="console" style="background:#111;color:#0f0;padding:10px;border-radius:8px;min-height:100px;font-size:12px;overflow:auto"></pre><script>const log=(...a)=>{document.getElementById("console").textContent+=a.map(x=>JSON.stringify(x)).join(" ")+"\\\\n"};console.log=log;console.error=log;console.warn=log;try{\'+code+\'}catch(e){log("ERROR:",e.message)}<\\/script></body></html>\'}',
+'    else if(lang==="php"){',
+'      let preview=code;',
+'      preview=preview.replace(/<\\?php\\s*echo\\s+["\\x27]([^"\\x27]+)["\\x27]\\s*;?\\s*\\?>/g,"$1");',
+'      preview=preview.replace(/<\\?php[\\s\\S]*?\\?>/g,"<!-- PHP server-side -->");',
+'      preview=preview.replace(/<\\?[\\s\\S]*?\\?>/g,"");',
+'      htmlContent=\'<!DOCTYPE html><html><head><style>body{font-family:sans-serif;padding:20px;background:#f9f9f9}.note{background:#fff3cd;border:1px solid #ffc107;padding:10px;border-radius:8px;margin-bottom:20px;font-size:13px;color:#856404}</style></head><body><div class="note">⚠️ PHP Preview (client-side). Server-side logic won\\x27t run. Only HTML/CSS output is visible.</div>\'+preview+"</body></html>"',
+'    }',
+'    $("pv-frame").srcdoc=htmlContent;',
+'    $("preview").classList.add("on");',
+'  }',
+'});',
+'function render(){',
+'  const c=getChat();',
+'  if(!c||!c.msgs.length){',
+'    $("w").innerHTML=\'<div id="empty"><img src="/logo.png" alt="UB Chat"><h1>Hello. <span>How can I help?</span></h1><p>Chats stay in your browser.</p>\'+',
+'      ["What\'s the weather in London?","Photos of the Taj Mahal","Latest technology news","Explain recursion with code"].map(x=>\'<button class="chip ex">\'+x+"</button>").join("")+"</div>";',
+'  } else $("w").innerHTML=c.msgs.map(bubble).join("");',
+'  $("msgs").scrollTop=$("msgs").scrollHeight;',
+'  $("list").innerHTML=chats.map(c=>\'<div class="ci\'+(c.id===cur?" on":"")+\'" data-id="\'+c.id+\'"><span>\'+E(c.title)+\'</span><button class="del">×</button></div>\').join("");',
+'}',
+'function setGo(){go.textContent=busy?"■":"↑";go.style.background=busy?"#e0453b":""}',
+'$("new").onclick=()=>{if(busy)return;cur=null;render();$("in").focus()};',
+'$("list").onclick=e=>{const row=e.target.closest(".ci");if(!row)return;const id=row.dataset.id;',
+'  if(e.target.classList.contains("del")){if(!confirm("Delete this chat?"))return;chats=chats.filter(c=>c.id!==id);if(cur===id)cur=null;save();render()}',
+'  else if(!busy){cur=id;render()}};',
+'$("w").onclick=e=>{if(e.target.classList.contains("ex"))send(e.target.textContent)};',
+'$("go").onclick=()=>busy?ctl.abort():send();',
+'const inp=$("in"),go=$("go");',
+'inp.oninput=()=>{inp.style.height="auto";inp.style.height=Math.min(inp.scrollHeight,180)+"px"};',
+'inp.onkeydown=e=>{if(e.key==="Enter"&&!e.shiftKey&&!matchMedia("(pointer:coarse)").matches){e.preventDefault();send()}};',
+'$("att").onclick=()=>{if(!busy)$("fi").click()};',
+'$("fi").onchange=async e=>{const f=e.target.files[0];e.target.value="";if(!f)return;',
+'  toast("Reading file…");',
+'  try{const fd=new FormData();fd.append("file",f);',
+'    const r=await fetch("/api/upload",{method:"POST",body:fd});',
+'    const j=await r.json();',
+'    if(!r.ok)throw new Error(j.error||"Upload failed");',
+'    pend=j;toast("Attached: "+j.name);$("ab").innerHTML=\'<span class="chip">📎 \'+E(j.name)+\' <b id="ax">✕</b></span>\';',
+'    $("ax").onclick=()=>{pend=null;$("ab").innerHTML=""};',
+'  }catch(er){toast(er.message)}',
+'};',
+'$("mic").onclick=async()=>{',
+'  if(rec){rec.stop();return}',
+'  if(!navigator.mediaDevices)return toast("Mic not available");',
+'  try{',
+'    const st=await navigator.mediaDevices.getUserMedia({audio:true});',
+'    const mr=new MediaRecorder(st);const chunks=[];',
+'    mr.ondataavailable=e=>{if(e.data.size)chunks.push(e.data)};',
+'    mr.onstop=async()=>{st.getTracks().forEach(t=>t.stop());',
+'      $("mic").textContent="🎙️";rec=null;',
+'      const blob=new Blob(chunks,{type:mr.mimeType||"audio/webm"});',
+'      if(blob.size<1500)return toast("Didn\'t catch that.");',
+'      toast("Converting voice…");',
+'      const fd=new FormData();fd.append("file",blob,"voice.webm");fd.append("language",(navigator.language||"en").slice(0,2));',
+'      const r=await fetch("/api/transcribe",{method:"POST",body:fd});',
+'      const j=await r.json();',
+'      if(!r.ok)return toast(j.error||"STT failed");',
+'      inp.value+=(inp.value?" ":"")+j.text;inp.focus();',
+'    };',
+'    mr.start();rec=mr;$("mic").textContent="⏹";toast("Listening… tap again to stop");',
+'  }catch(e){toast("Mic permission needed")}',
+'};',
+'async function send(txt){',
+'  let text=(txt||inp.value).trim();',
+'  if((!text&&!pend)||busy)return;',
+'  let c=getChat();',
+'  if(!c){c={id:uid(),title:text.slice(0,40)||(pend&&pend.name)||"New chat",msgs:[]};chats.unshift(c);cur=c.id}',
+'  const userMsg={role:"user",content:text||(pend?("Summarise this file: "+pend.name):"")};',
+'  c.msgs.push(userMsg);',
+'  const att=pend?{name:pend.name,text:pend.text,base64:pend.base64,mime:pend.mime}:null;',
+'  if(pend){pend=null;$("ab").innerHTML=""}',
+'  const m={role:"model",content:""};c.msgs.push(m);',
+'  inp.value="";inp.style.height="auto";busy=true;setGo();render();',
+'  ctl=new AbortController();',
+'  try{',
+'    const history=c.msgs.slice(0,-2).map(x=>({role:x.role,content:x.content}));',
+'    const r=await fetch("/api/chat",{method:"POST",signal:ctl.signal,',
+'      headers:{"Content-Type":"application/json"},',
+'      body:JSON.stringify({',
+'        model:$("model").value,',
+'        message:userMsg.content,',
+'        messages:history,',
+'        attachment_text:att?(att.text+(att.base64?"\\n[Attached file: "+att.mime+"]":"")):""',
+'      })});',
+'    if(!r.ok){const j=await r.json().catch(()=>({}));throw new Error(j.error||("HTTP "+r.status))}',
+'    const ct=r.headers.get("content-type")||"";',
+'    if(ct.includes("application/json")){',
+'      const j=await r.json();',
+'      if(j.kind==="weather")m.content="🌤️ "+j.data.name+"\\n\\n**"+j.data.t+"°C** — "+j.data.s+"\\nWind "+j.data.w+" km/h";',
+'      else if(j.kind==="crypto")m.content=j.data.map(p=>"**"+p.name+"** — ₹"+p.inr+" / $"+p.usd+(p.chg!=null?" ("+p.chg.toFixed(1)+"%)":"")).join("\\n");',
+'      else if(j.kind==="image")m.content="![Made image]("+j.url+")\\n\\n"+j.text;',
+'      else if(j.kind==="images")m.content=j.images.map(x=>"- ["+x.title+"]("+x.link+")").join("\\n");',
+'      else m.content=j.text||"";',
+'      render();busy=false;setGo();save();return;',
+'    }',
+'    const rd=r.body.getReader();const dec=new TextDecoder();let buf="";',
+'    for(;;){',
+'      const{done,value}=await rd.read();if(done)break;',
+'      buf+=dec.decode(value,{stream:true});',
+'      const lines=buf.split("\\n");buf=lines.pop();',
+'      for(const ln of lines){',
+'        if(!ln.trim())continue;',
+'        try{const j=JSON.parse(ln);',
+'          if(j.type==="delta"){m.content+=j.text;render()}',
+'          else if(j.type==="error"){m.err=true;m.content=j.error}',
+'        }catch(e){}',
+'      }',
+'    }',
+'  }catch(e){if(e.name!=="AbortError"){m.err=true;m.content="Couldn\'t get a response. Try again."}}',
+'  busy=false;setGo();save();render();',
+'}',
+'setInterval(()=>{$("clock").textContent=new Date().toLocaleString("en-GB",{weekday:"short",day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"})},20000);',
+'render();',
+'</script>',
+'</body>',
+'</html>',
+]
 
-/* BEAUTIFUL CODE BLOCK */
-.code{background:var(--code-bg);border-radius:14px;margin:12px 0;overflow:hidden;border:1px solid #333;box-shadow:0 4px 12px rgba(0,0,0,.2)}
-.ch{display:flex;justify-content:space-between;align-items:center;padding:8px 14px;background:#2d2d3f;color:#aaa;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
-.ch span{display:flex;align-items:center;gap:6px}
-.ch .lang-dot{width:8px;height:8px;border-radius:50%;background:#f1fa8c}
-.ch .btns{display:flex;gap:8px}
-.ch button{color:#ccc;font-size:12px;padding:2px 8px;border-radius:6px;transition:background .15s}
-.ch button:hover{background:#444;color:#fff}
-.ch button.preview{color:#8be9fd}
-.ch button.preview:hover{background:#8be9fd;color:#000}
-.code pre{padding:14px 16px;overflow-x:auto;margin:0;font:13.5px/1.6 ui-monospace,Menlo,Consolas,monospace;color:#f8f8f2;background:var(--code-bg)}
-.code pre code{background:none;padding:0;font:inherit;color:inherit}
+INDEX_HTML = "\n".join(HTML_LINES)
 
-/* IMAGE GRID */
-.card{background:var(--card);border-radius:16px;padding:14px 16px;box-shadow:var(--sh);margin:8px 0}
-.card .big{font-size:34px;font-weight:700}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin:12px 0}
-.gi{position:relative;border-radius:14px;overflow:hidden;background:var(--bd);display:block;color:inherit;text-decoration:none;box-shadow:0 2px 6px rgba(0,0,0,.1);transition:transform .15s}
-.gi:hover{transform:scale(1.02)}
-.gi img{width:100%;aspect-ratio:1;object-fit:cover;display:block}
-.gi .ttl{display:block;padding:8px;background:var(--card);font-size:12px;line-height:1.3;max-height:44px;overflow:hidden}
-
-/* LINK GRID */
-.lgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:10px 0}
-.lcard{display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--card);border:1px solid var(--bd);border-radius:12px;text-decoration:none;color:inherit;min-width:0;transition:box-shadow .15s,transform .1s}
-.lcard:hover{box-shadow:var(--sh);transform:translateY(-1px)}
-.lcard img{width:20px;height:20px;flex:none;border-radius:4px;background:var(--bg)}
-.lcard span{flex:1;min-width:0;font-size:13.5px;line-height:1.35;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
-.lcard small{display:block;color:var(--mu);font-size:11px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-
-#bar{padding:4px 12px 12px}
-#box{max-width:780px;margin:0 auto;display:flex;align-items:flex-end;gap:8px;background:var(--card);border-radius:26px;padding:8px;box-shadow:0 4px 18px rgba(20,27,52,.1);border:1px solid var(--bd)}
-#in{flex:1;border:0;background:none;outline:0;resize:none;max-height:180px;padding:8px 0;line-height:1.5}
-#go{width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,var(--ac),#6c8cff);color:#fff;font-size:19px;flex:none;display:flex;align-items:center;justify-content:center}
-#go:active{transform:scale(.92)}
-#empty{text-align:center;margin-top:6vh}
-#empty img{width:130px;height:130px;object-fit:contain}
-#empty h1{font-size:28px;font-weight:800}
-#empty h1 span{background:linear-gradient(90deg,var(--ac2),var(--ac),#138808);-webkit-background-clip:text;background-clip:text;color:transparent}
-#empty p{color:var(--mu);margin:4px 0 18px}
-.chip{display:inline-block;background:var(--card);border:1px solid var(--bd);border-radius:20px;padding:6px 14px;font-size:14px;margin:4px 6px 4px 0}
-#toast{position:fixed;left:50%;bottom:96px;transform:translateX(-50%);background:var(--tx);color:var(--bg);padding:9px 16px;border-radius:12px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:60}
-#toast.on{opacity:1}
-
-/* PREVIEW MODAL */
-#preview{position:fixed;inset:0;background:rgba(0,0,0,.8);display:none;z-index:100;flex-direction:column}
-#preview.on{display:flex}
-#preview-bar{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:var(--card);border-bottom:1px solid var(--bd);color:var(--tx)}
-#preview-bar b{font-size:15px}
-#preview-bar button{color:var(--tx);font-size:14px;padding:6px 12px;border-radius:8px}
-#preview-bar button:hover{background:var(--bg)}
-#preview iframe{flex:1;border:0;background:#fff;width:100%;height:100%}
-
-@media(max-width:800px){#side{display:none}.m.a .b{font-size:16px}}
-@media(max-width:520px){.lgrid{grid-template-columns:1fr}}
-</style>
-</head>
-<body>
-<aside id="side">
-  <div class="brand"><img src="/logo.png" alt="UB Chat"><b>UB Chat</b></div>
-  <button class="new" id="new">+ New chat</button>
-  <div id="list"></div>
-</aside>
-<section id="main">
-  <header id="top">
-    <select id="model"></select>
-    <span style="flex:1;text-align:right;color:var(--mu);font-size:13px" id="clock"></span>
-  </header>
-  <div id="msgs"><div class="w" id="w"></div></div>
-  <div id="bar">
-    <div id="ab" style="max-width:780px;margin:0 auto"></div>
-    <input type="file" id="fi" hidden accept="image/*,application/pdf,.pdf,.zip,text/*,.md,.json,.csv,.js,.ts,.py,.html,.css,.php">
-    <div id="box">
-      <button id="att" class="chip" style="padding:8px 10px;margin:0">📎</button>
-      <textarea id="in" rows="1" placeholder="Ask UB Chat anything"></textarea>
-      <button id="mic" class="chip" style="padding:8px 10px;margin:0">🎙️</button>
-      <button id="go" aria-label="Send">↑</button>
-    </div>
-  </div>
-</section>
-<div id="toast"></div>
-
-<!-- PREVIEW MODAL -->
-<div id="preview">
-  <div id="preview-bar">
-    <b>Live Preview</b>
-    <div style="display:flex;gap:6px">
-      <button id="pv-reload">Reload</button>
-      <button id="pv-close" style="font-weight:700">Close ✕</button>
-    </div>
-  </div>
-  <iframe id="pv-frame" sandbox="allow-scripts allow-modals allow-forms allow-popups allow-same-origin"></iframe>
-</div>
-
-<script>
-const $=id=>document.getElementById(id);
-const LS={g(k,d){try{const v=JSON.parse(localStorage.getItem(k));return v==null?d:v}catch(e){return d}},s(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
-const E=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
-function toast(t){const el=$("toast");el.textContent=t;el.classList.add("on");clearTimeout(toast._t);toast._t=setTimeout(()=>el.classList.remove("on"),2500)}
-
-let chats=LS.g("ub_chats",[]),cur=null,busy=false,ctl=null,pend=null,rec=null;
-const MODELS=["UB Quick Flash 2.4","UB Flash 3.5","UB Flash 3.8"];
-MODELS.forEach(n=>$("model").add(new Option(n,n)));
-$("model").value=LS.g("ub_model",MODELS[1]);
-$("model").onchange=()=>LS.s("ub_model",$("model").value);
-const getChat=()=>chats.find(c=>c.id===cur);
-const save=()=>LS.s("ub_chats",chats);
-
-/* ---------- URL Grid ---------- */
-const URL_RE = /\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)|(https?:\/\/[^\s<>)"']+)/g;
-function linkGrid(raw){
-  const seen = new Set(); const items = [];
-  let m; URL_RE.lastIndex = 0;
-  while ((m = URL_RE.exec(raw)) !== null){
-    const title = (m[1] || "").trim();
-    const url   = (m[2] || m[3] || "").trim();
-    if (!url || seen.has(url)) continue;
-    seen.add(url);
-    let domain = "";
-    try { domain = new URL(url).hostname.replace(/^www\./, ""); } catch(e){}
-    items.push({title: title || domain || url, url, domain});
-  }
-  if (!items.length) return "";
-  const cards = items.map(it => {
-    const fav = "https://www.google.com/s2/favicons?domain=" + encodeURIComponent(it.domain) + "&sz=32";
-    return '<a class="lcard" href="'+E(it.url)+'" target="_blank" rel="noopener"><img src="'+fav+'" alt="" loading="lazy" onerror="this.style.display=\'none\'"><span>'+E(it.title)+'<small>'+E(it.domain)+'</small></span></a>';
-  }).join("");
-  return '<div class="lgrid">'+cards+'</div>';
-}
-
-/* ---------- Markdown & Code Renderer ---------- */
-function md(t){
-  t = t.replace(/^([A-Za-z0-9][^\n\]]{1,120})\]\((https?:\/\/[^)\s]+)\)/gm, "[$1]($2)");
-  t = E(t);
-  
-  // Extract code blocks first
-  const codeBlocks = [];
-  t = t.replace(/```(\w*)\n?([\s\S]*?)```/g, (m, lang, code) => {
-    const idx = codeBlocks.length;
-    const l = lang || "code";
-    // Determine if this language can be previewed
-    const canPreview = ["html", "php", "css", "js", "javascript", "svg"].includes(l.toLowerCase());
-    const prevBtn = canPreview ? `<button class="preview" data-code-idx="${idx}" data-lang="${l}">Preview ▶</button>` : "";
-    
-    codeBlocks.push({ lang: l, code: code.trim() });
-    return `<div class="code" data-idx="${idx}"><div class="ch"><span><i class="lang-dot"></i> ${l}</span><div class="btns">${prevBtn}<button class="copy" data-code-idx="${idx}">Copy</button></div></div><pre><code class="language-${l}">${E(code.trim())}</code></pre></div>`;
-  });
-
-  // Links
-  t = t.replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, (m,txt,url)=>'<a href="'+url+'" target="_blank" rel="noopener">'+txt+'</a>');
-  
-  // Bold, Headers, Lists
-  t = t.replace(/\*\*([^*\n]+)\*\*/g,"<b>$1</b>");
-  t = t.replace(/^### (.*)$/gm,"<h4>$1</h4>").replace(/^#{1,2} (.*)$/gm,"<h3>$1</h3>");
-  t = t.replace(/^(?:[-*] .*(?:\n|$))+/gm,m=>"<ul>"+m.trim().split("\n").map(x=>"<li>"+x.slice(2)+"</li>").join("")+"</ul>");
-  t = t.replace(/\n{2,}/g,"<br><br>").replace(/\n/g,"<br>");
-
-  // Re-inject code blocks (using placeholders so we don't re-escape)
-  let blockPlaceholder = 0;
-  t = t.replace(/@@CODE_BLOCK_(\d+)@@/g, (m, idx) => `<div class="code" data-idx="${idx}"><div class="ch"><span><i class="lang-dot"></i> ${codeBlocks[idx].lang}</span><div class="btns">${["html","php","css","js","javascript","svg"].includes(codeBlocks[idx].lang.toLowerCase()) ? `<button class="preview" data-code-idx="${idx}" data-lang="${codeBlocks[idx].lang}">Preview ▶</button>` : ""}<button class="copy" data-code-idx="${idx}">Copy</button></div></div><pre><code class="language-${codeBlocks[idx].lang}">${E(codeBlocks[idx].code)}</code></pre></div>`);
-  
-  // Highlight
-  setTimeout(() => { if(window.hljs) document.querySelectorAll('.code code').forEach(el => hljs.highlightElement(el)); }, 10);
-
-  return t;
-}
-
-// Because md() modifies the text, we need to store code blocks globally so preview can access them.
-window.__codeBlocks = [];
-// Override md to store globally
-const originalMd = md;
-md = function(t) {
-  window.__codeBlocks = []; // reset
-  // We need to inject placeholders for code blocks before E() escapes them
-  t = t.replace(/^([A-Za-z0-9][^\n\]]{1,120})\]\((https?:\/\/[^)\s]+)\)/gm, "[$1]($2)");
-  const escaped = E(t);
-  
-  const blocks = [];
-  // Temporarily replace code blocks with placeholders
-  const withPlaceholders = escaped.replace(/```(\w*)\n?([\s\S]*?)```/g, (m, lang, code) => {
-    const idx = blocks.length;
-    blocks.push({ lang: lang || "code", code: code.trim() });
-    window.__codeBlocks.push({ lang: lang || "code", code: code.trim() });
-    return `\n\n@@CODE_BLOCK_${idx}@@\n\n`;
-  });
-  
-  // Now do markdown on the text without code
-  let html = withPlaceholders
-    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, (m,txt,url)=>'<a href="'+url+'" target="_blank" rel="noopener">'+txt+'</a>')
-    .replace(/\*\*([^*\n]+)\*\*/g,"<b>$1</b>")
-    .replace(/^### (.*)$/gm,"<h4>$1</h4>")
-    .replace(/^#{1,2} (.*)$/gm,"<h3>$1</h3>")
-    .replace(/^(?:[-*] .*(?:\n|$))+/gm,m=>"<ul>"+m.trim().split("\n").map(x=>"<li>"+x.slice(2)+"</li>").join("")+"</ul>")
-    .replace(/\n{2,}/g,"<br><br>").replace(/\n/g,"<br>");
-
-  // Replace placeholders with actual code blocks
-  html = html.replace(/@@CODE_BLOCK_(\d+)@@/g, (m, idx) => {
-    const b = blocks[idx];
-    const canPreview = ["html", "php", "css", "js", "javascript", "svg"].includes(b.lang.toLowerCase());
-    return `<div class="code" data-idx="${idx}"><div class="ch"><span><i class="lang-dot"></i> ${b.lang}</span><div class="btns">${canPreview ? `<button class="preview" data-code-idx="${idx}" data-lang="${b.lang}">Preview ▶</button>` : ""}<button class="copy" data-code-idx="${idx}">Copy</button></div></div><pre><code class="language-${b.lang}">${E(b.code)}</code></pre></div>`;
-  });
-
-  setTimeout(() => { if(window.hljs) document.querySelectorAll('.code code').forEach(el => hljs.highlightElement(el)); }, 10);
-
-  return html;
-};
-
-function bubble(m){
-  if(m.role==="user")return '<div class="m u"><div class="b">'+E(m.content)+"</div></div>";
-  let body;
-  if(m.err){
-    body = '<span style="color:#e0453b">'+E(m.content)+"</span>";
-  } else {
-    const html = md(m.content||"");
-    const grid = linkGrid(m.content||"");
-    body = html + grid;
-  }
-  return '<div class="m a"><i class="av"><img src="/logo.png" alt="UB"></i><div class="b">'+body+"</div></div>";
-}
-
-/* ---------- Preview Modal ---------- */
-$("pv-close").onclick = () => $("preview").classList.remove("on");
-$("pv-reload").onclick = () => { const f = $("pv-frame"); f.src = f.src; };
-
-document.addEventListener("click", e => {
-  // Copy button
-  if (e.target.classList.contains("copy")) {
-    const idx = e.target.dataset.codeIdx;
-    const block = window.__codeBlocks[idx];
-    if (block) {
-      navigator.clipboard.writeText(block.code).then(() => {
-        e.target.textContent = "Copied!";
-        setTimeout(() => e.target.textContent = "Copy", 1500);
-      }).catch(() => toast("Copy failed"));
-    }
-  }
-
-  // Preview button
-  if (e.target.classList.contains("preview")) {
-    const idx = e.target.dataset.codeIdx;
-    const lang = (e.target.dataset.lang || "").toLowerCase();
-    const block = window.__codeBlocks[idx];
-    if (!block) return;
-
-    let htmlContent = "";
-    const code = block.code;
-
-    if (lang === "html" || lang === "svg") {
-      htmlContent = code;
-    } else if (lang === "css") {
-      htmlContent = `<!DOCTYPE html><html><head><style>${code}</style></head><body><div style="padding:20px;font-family:sans-serif"><h2>CSS Preview</h2><p class="demo">This is a demo paragraph to show your CSS styles. Try adding elements like <code>&lt;h1&gt;</code>, <code>&lt;p&gt;</code>, <code>&lt;button&gt;</code> in your CSS.</p><button class="btn">Click Me</button><div class="card"><h3>Card Title</h3><p>Card content here.</p></div></div></body></html>`;
-    } else if (lang === "js" || lang === "javascript") {
-      htmlContent = `<!DOCTYPE html><html><head><style>body{font-family:sans-serif;padding:20px}</style></head><body><h2>JS Preview</h2><div id="output">Check console for logs...</div><pre id="console" style="background:#111;color:#0f0;padding:10px;border-radius:8px;min-height:100px;font-size:12px;overflow:auto"></pre><script>
-        // Redirect console.log to the page
-        const log = (...args) => { document.getElementById('console').textContent += args.map(a=>JSON.stringify(a)).join(' ') + '\\n'; };
-        console.log = log; console.error = log; console.warn = log;
-        try {
-          ${code}
-        } catch(e) { log('ERROR:', e.message); }
-      </script></body></html>`;
-    } else if (lang === "php") {
-      // Client-side PHP preview:
-      // We strip PHP tags and try to render whatever HTML is left.
-      // We also handle simple echo statements.
-      let preview = code;
-      // Replace simple <?php echo "text"; ?> with text
-      preview = preview.replace(/<\?php\s*echo\s+["']([^"']+)["']\s*;?\s*\?>/g, "$1");
-      // Remove remaining PHP code (keep HTML)
-      preview = preview.replace(/<\?php[\s\S]*?\?>/g, "<!-- PHP code executed server-side -->");
-      preview = preview.replace(/<\?[\s\S]*?\?>/g, "");
-      
-      htmlContent = `<!DOCTYPE html><html><head><style>body{font-family:sans-serif;padding:20px;background:#f9f9f9} .note{background:#fff3cd;border:1px solid #ffc107;padding:10px;border-radius:8px;margin-bottom:20px;font-size:13px;color:#856404}</style></head><body><div class="note">⚠️ PHP Preview (Client-side). Server-side logic (database, sessions) won't run. Only HTML/CSS output is visible.</div>${preview}</body></html>`;
-    }
-
-    const frame = $("pv-frame");
-    frame.srcdoc = htmlContent;
-    $("preview").classList.add("on");
-  }
-});
-
-/* ---------- Chat Logic ---------- */
-function render(){
-  const c=getChat();
-  if(!c||!c.msgs.length){
-    $("w").innerHTML='<div id="empty"><img src="/logo.png" alt="UB Chat"><h1>Hello. <span>How can I help?</span></h1><p>Chats stay in your browser.</p>'+
-      ["What's the weather in London?","Photos of the Taj Mahal","Latest technology news","Explain recursion with code"].map(x=>'<button class="chip ex">'+x+"</button>").join("")+"</div>";
-  } else $("w").innerHTML=c.msgs.map(bubble).join("");
-  $("msgs").scrollTop=$("msgs").scrollHeight;
-  $("list").innerHTML=chats.map(c=>'<div class="ci'+(c.id===cur?" on":"")+'" data-id="'+c.id+'"><span>'+E(c.title)+'</span><button class="del">×</button></div>').join("");
-}
-function setGo(){go.textContent=busy?"■":"↑";go.style.background=busy?"#e0453b":""}
-$("new").onclick=()=>{if(busy)return;cur=null;render();$("in").focus()};
-$("list").onclick=e=>{const row=e.target.closest(".ci");if(!row)return;const id=row.dataset.id;
-  if(e.target.classList.contains("del")){if(!confirm("Delete this chat?"))return;chats=chats.filter(c=>c.id!==id);if(cur===id)cur=null;save();render()}
-  else if(!busy){cur=id;render()}};
-$("w").onclick=e=>{if(e.target.classList.contains("ex"))send(e.target.textContent)};
-$("go").onclick=()=>busy?ctl.abort():send();
-const inp=$("in"),go=$("go");
-inp.oninput=()=>{inp.style.height="auto";inp.style.height=Math.min(inp.scrollHeight,180)+"px"};
-inp.onkeydown=e=>{if(e.key==="Enter"&&!e.shiftKey&&!matchMedia("(pointer:coarse)").matches){e.preventDefault();send()}};
-$("att").onclick=()=>{if(!busy)$("fi").click()};
-$("fi").onchange=async e=>{const f=e.target.files[0];e.target.value="";if(!f)return;
-  toast("Reading file…");
-  try{const fd=new FormData();fd.append("file",f);
-    const r=await fetch("/api/upload",{method:"POST",body:fd});
-    const j=await r.json();
-    if(!r.ok)throw new Error(j.error||"Upload failed");
-    pend=j;toast("Attached: "+j.name);$("ab").innerHTML='<span class="chip">📎 '+E(j.name)+' <b id="ax">✕</b></span>';
-    $("ax").onclick=()=>{pend=null;$("ab").innerHTML=""};
-  }catch(er){toast(er.message)}
-};
-$("mic").onclick=async()=>{
-  if(rec){rec.stop();return}
-  if(!navigator.mediaDevices)return toast("Mic not available");
-  try{
-    const st=await navigator.mediaDevices.getUserMedia({audio:true});
-    const mr=new MediaRecorder(st);const chunks=[];
-    mr.ondataavailable=e=>{if(e.data.size)chunks.push(e.data)};
-    mr.onstop=async()=>{st.getTracks().forEach(t=>t.stop());
-      $("mic").textContent="🎙️";rec=null;
-      const blob=new Blob(chunks,{type:mr.mimeType||"audio/webm"});
-      if(blob.size<1500)return toast("Didn't catch that.");
-      toast("Converting voice…");
-      const fd=new FormData();fd.append("file",blob,"voice.webm");fd.append("language",(navigator.language||"en").slice(0,2));
-      const r=await fetch("/api/transcribe",{method:"POST",body:fd});
-      const j=await r.json();
-      if(!r.ok)return toast(j.error||"STT failed");
-      inp.value+=(inp.value?" ":"")+j.text;inp.focus();
-    };
-    mr.start();rec=mr;$("mic").textContent="⏹";toast("Listening… tap again to stop");
-  }catch(e){toast("Mic permission needed")}
-};
-async function send(txt){
-  let text=(txt||inp.value).trim();
-  if((!text&&!pend)||busy)return;
-  let c=getChat();
-  if(!c){c={id:uid(),title:text.slice(0,40)||(pend&&pend.name)||"New chat",msgs:[]};chats.unshift(c);cur=c.id}
-  const userMsg={role:"user",content:text||(pend?("Summarise this file: "+pend.name):"")};
-  c.msgs.push(userMsg);
-  const att=pend?{name:pend.name,text:pend.text,base64:pend.base64,mime:pend.mime}:null;
-  if(pend){pend=null;$("ab").innerHTML=""}
-  const m={role:"model",content:""};c.msgs.push(m);
-  inp.value="";inp.style.height="auto";busy=true;setGo();render();
-  ctl=new AbortController();
-  try{
-    const history=c.msgs.slice(0,-2).map(x=>({role:x.role,content:x.content}));
-    const r=await fetch("/api/chat",{method:"POST",signal:ctl.signal,
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({
-        model:$("model").value,
-        message:userMsg.content,
-        messages:history,
-        attachment_text: att?(att.text+(att.base64?"\n[Attached file: "+att.mime+"]":"")): ""
-      })});
-    if(!r.ok){const j=await r.json().catch(()=>({}));throw new Error(j.error||("HTTP "+r.status))}
-    const ct=r.headers.get("content-type")||"";
-    if(ct.includes("application/json")){
-      const j=await r.json();
-      if(j.kind==="weather")m.content="🌤️ "+j.data.name+"\n\n**"+j.data.t+"°C** — "+j.data.s+"\nWind "+j.data.w+" km/h";
-      else if(j.kind==="crypto")m.content=j.data.map(p=>"**"+p.name+"** — ₹"+p.inr+" / $"+p.usd+(p.chg!=null?" ("+p.chg.toFixed(1)+"%)":"")).join("\n");
-      else if(j.kind==="image")m.content="![Made image]("+j.url+")\n\n"+j.text;
-      else if(j.kind==="images")m.content=j.images.map(x=>"- ["+x.title+"]("+x.link+")").join("\n");
-      else m.content=j.text||"";
-      render();busy=false;setGo();save();return;
-    }
-    const rd=r.body.getReader();const dec=new TextDecoder();let buf="";
-    for(;;){
-      const{done,value}=await rd.read();if(done)break;
-      buf+=dec.decode(value,{stream:true});
-      const lines=buf.split("\n");buf=lines.pop();
-      for(const ln of lines){
-        if(!ln.trim())continue;
-        try{const j=JSON.parse(ln);
-          if(j.type==="delta"){m.content+=j.text;render()}
-          else if(j.type==="error"){m.err=true;m.content=j.error}
-        }catch(e){}
-      }
-    }
-  }catch(e){if(e.name!=="AbortError"){m.err=true;m.content="Couldn't get a response. Try again."}}
-  busy=false;setGo();save();render();
-}
-setInterval(()=>{$("clock").textContent=new Date().toLocaleString("en-GB",{weekday:"short",day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"})},20000);
-render();
-</script>
-</body>
-</html>
-"""
-
+# ------------------------------------------------------------------
+#  Routes
+# ------------------------------------------------------------------
 @app.route("/")
 def index():
-    return Response(INDEX_HTML, mimetype="text/html")
+    # Explicit headers — this is the fix for the "raw HTML rendered as text" bug.
+    return Response(
+        INDEX_HTML,
+        mimetype="text/html",
+        headers={
+            "Content-Type": "text/html; charset=utf-8",
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "no-store, max-age=0",
+        },
+    )
 
 @app.route("/logo.png")
 def logo():
@@ -922,6 +862,20 @@ def health():
         "groq_keys": sum(1 for v in GROQ_KEYS.values() if v),
         "backup_keys": len(BACKUP_KEYS), "search_keys": len(SEARCH_KEYS),
         "rate_limit": f"{RATE_LIMIT_PER_MIN}/min per IP",
+        "html_len": len(INDEX_HTML),
+    })
+
+@app.route("/__diag")
+def __diag():
+    return jsonify({
+        "len": len(INDEX_HTML),
+        "starts": INDEX_HTML[:60],
+        "ends": INDEX_HTML[-60:],
+        "has_doctype": "<!DOCTYPE html>" in INDEX_HTML,
+        "has_closing_html": "</html>" in INDEX_HTML,
+        "has_script_tag": "<script>" in INDEX_HTML,
+        "has_closing_script": "</script>" in INDEX_HTML,
+        "line_count": len(HTML_LINES),
     })
 
 @app.route("/favicon.ico")
