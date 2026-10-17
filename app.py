@@ -1,7 +1,9 @@
 """
 UB Chat — single-file backend
-Deploy on Render free tier with: gunicorn app:app --bind 0.0.0.0:$PORT
-Works with UptimeRobot pings on /health
+Deploy on Render free tier with:
+    gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 90
+
+UptimeRobot ping endpoint:  GET /health
 """
 
 import os
@@ -9,7 +11,6 @@ import io
 import re
 import json
 import time
-import math
 import base64
 import zipfile
 import threading
@@ -17,7 +18,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 import requests
-from flask import Flask, request, jsonify, render_template_string, send_from_directory, abort
+from flask import Flask, request, jsonify, render_template_string, send_from_directory
 
 # ------------------------------------------------------------------
 #  CONFIG (from environment — nothing secret is hard-coded)
@@ -34,25 +35,40 @@ GROQ_KEYS = {
     "spare":  _env("GROQ_KEY_SPARE"),
 }
 
-SEARCH_KEYS = [k for k in _env("SEARCH_KEYS").split(",") if k.strip()]
+SEARCH_KEYS = [k.strip() for k in _env("SEARCH_KEYS").split(",") if k.strip()]
 
-BACKUP_KEYS = [k.strip() for k in _env("BACKUP_KEYS", "").splitlines() if k.strip()]
+# Accept both real newlines and literal \n (some dashboards single-line env vars)
+BACKUP_KEYS = [
+    k.strip()
+    for k in _env("BACKUP_KEYS", "").replace("\\n", "\n").splitlines()
+    if k.strip()
+]
 
 GROQ_API   = "https://api.groq.com/openai/v1"
 GEMINI_API = "https://generativelanguage.googleapis.com/v1beta/models"
 SERPER_API = "https://google.serper.dev"
 
 MODELS = {
-    "UB Quick Flash 2.4": {"id": "openai/gpt-oss-20b",  "role": "speed", "effort": "low",    "tokens": 2048, "history": 6,  "hint": "Reply as briefly as possible: a few short sentences, unless the user asks for detail."},
-    "UB Flash 3.5":       {"id": "openai/gpt-oss-120b", "role": "brain", "effort": "low",    "history": 10, "hint": "Give clear, helpful answers of medium length."},
-    "UB Flash 3.8":       {"id": "openai/gpt-oss-120b", "role": "deep",  "effort": "high",   "history": 12, "hint": "Think carefully and give a complete, well-structured, detailed answer with reasons and examples."},
+    "UB Quick Flash 2.4": {
+        "id": "openai/gpt-oss-20b", "role": "speed", "effort": "low",
+        "tokens": 2048, "history": 6,
+        "hint": "Reply as briefly as possible: a few short sentences, unless the user asks for detail.",
+    },
+    "UB Flash 3.5": {
+        "id": "openai/gpt-oss-120b", "role": "brain", "effort": "low",
+        "history": 10,
+        "hint": "Give clear, helpful answers of medium length.",
+    },
+    "UB Flash 3.8": {
+        "id": "openai/gpt-oss-120b", "role": "deep", "effort": "high",
+        "history": 12,
+        "hint": "Think carefully and give a complete, well-structured, detailed answer with reasons and examples.",
+    },
 }
 
-VISION_MODEL = _env("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")
+VISION_MODEL  = _env("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")
 WHISPER_MODEL = _env("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")
-IMAGE_MODELS = ["gemini-2.5-flash-image", "gemini-3.1-flash-image-preview"]
-IMAGE_LIMIT = 3
-IMAGE_HOURS = 24
+IMAGE_MODELS  = ["gemini-2.5-flash-image", "gemini-3.1-flash-image-preview"]
 
 SYSTEM = (
     "You are UB Chat, a fast, accurate assistant from India. "
@@ -83,30 +99,25 @@ app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024  # 20 MB upload cap
 # ------------------------------------------------------------------
 #  Rate limiting (per client IP — 5 requests / minute)
 # ------------------------------------------------------------------
-_rate_lock = threading.Lock()
+_rate_lock  = threading.Lock()
 _rate_state = defaultdict(list)  # ip -> list of timestamps
 
-
 def client_ip():
-    # Render terminates TLS and sets X-Forwarded-For
     fwd = request.headers.get("X-Forwarded-For", "")
     if fwd:
         return fwd.split(",")[0].strip()
     return request.remote_addr or "unknown"
 
-
 def rate_ok(ip):
     now = time.time()
     with _rate_lock:
         bucket = _rate_state[ip]
-        # drop old entries
         while bucket and now - bucket[0] > RATE_WINDOW_SEC:
             bucket.pop(0)
         if len(bucket) >= RATE_LIMIT_PER_MIN:
             return False
         bucket.append(now)
         return True
-
 
 def rate_guard(fn):
     def wrapper(*a, **k):
@@ -130,27 +141,20 @@ def err_text(raw):
     except Exception:
         return (raw or "Request failed")[:200]
 
-
 def strip_think(t):
     t = re.sub(r"<think>[\s\S]*?</think>", "", t)
     t = re.sub(r"<think>[\s\S]*$", "", t)
     return t
 
-
 def now_str():
     return datetime.now(timezone.utc).strftime("%A, %d %B %Y, %H:%M UTC")
-
 
 # ------------------------------------------------------------------
 #  Groq streaming (primary AI)
 # ------------------------------------------------------------------
 def groq_stream(model_name, messages, key):
     cfg = MODELS.get(model_name, MODELS["UB Flash 3.5"])
-    payload = {
-        "model": cfg["id"],
-        "messages": messages,
-        "stream": True,
-    }
+    payload = {"model": cfg["id"], "messages": messages, "stream": True}
     if cfg.get("effort"):
         payload["reasoning_effort"] = cfg["effort"]
     if cfg.get("tokens"):
@@ -159,9 +163,7 @@ def groq_stream(model_name, messages, key):
     r = requests.post(
         f"{GROQ_API}/chat/completions",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
-        json=payload,
-        stream=True,
-        timeout=30,
+        json=payload, stream=True, timeout=30,
     )
     if r.status_code != 200:
         raise RuntimeError(err_text(r.text))
@@ -179,7 +181,6 @@ def groq_stream(model_name, messages, key):
                 yield delta["content"]
         except Exception:
             continue
-
 
 def try_groq(model_name, messages):
     """Try primary key for the model, then brain, then speed, then deep."""
@@ -203,14 +204,14 @@ def try_groq(model_name, messages):
             continue
     raise RuntimeError("Primary AI unavailable")
 
-
 # ------------------------------------------------------------------
 #  Gemini streaming (backup AI, plus image generation)
 # ------------------------------------------------------------------
 def gemini_stream(model_name, contents, key):
     cfg = MODELS.get(model_name, MODELS["UB Flash 3.5"])
-    # Gemini "thinking" levels — fall back gracefully
-    think = {"UB Quick Flash 2.4": "minimal", "UB Flash 3.5": "low", "UB Flash 3.8": "low"}.get(model_name, "low")
+    think = {"UB Quick Flash 2.4": "minimal",
+             "UB Flash 3.5": "low",
+             "UB Flash 3.8": "low"}.get(model_name, "low")
     sys = SYSTEM + NAMEHINT + " " + cfg["hint"] + " Current date and time: " + now_str() + "."
     body = {
         "systemInstruction": {"parts": [{"text": sys}]},
@@ -220,9 +221,7 @@ def gemini_stream(model_name, contents, key):
     r = requests.post(
         f"{GEMINI_API}/gemini-3.5-flash:streamGenerateContent?alt=sse",
         headers={"Content-Type": "application/json", "x-goog-api-key": key},
-        json=body,
-        stream=True,
-        timeout=45,
+        json=body, stream=True, timeout=45,
     )
     if r.status_code != 200:
         raise RuntimeError(err_text(r.text))
@@ -238,13 +237,11 @@ def gemini_stream(model_name, contents, key):
         except Exception:
             continue
 
-
 # ------------------------------------------------------------------
 #  Search (Serper)
 # ------------------------------------------------------------------
 _search_cache = {}
-_search_lock = threading.Lock()
-
+_search_lock  = threading.Lock()
 
 def serper_search(query, num=6):
     ck = query.lower() + "|" + str(num)
@@ -262,8 +259,7 @@ def serper_search(query, num=6):
             r = requests.post(
                 f"{SERPER_API}/search",
                 headers={"X-API-KEY": k, "Content-Type": "application/json"},
-                json={"q": query, "num": num},
-                timeout=12,
+                json={"q": query, "num": num}, timeout=12,
             )
             if r.status_code == 200:
                 data = r.json()
@@ -275,6 +271,23 @@ def serper_search(query, num=6):
             last = str(e)
     raise RuntimeError(last)
 
+def serper_images(query, num=9):
+    if not SEARCH_KEYS:
+        raise RuntimeError("Search not configured")
+    last = "Search unavailable"
+    for k in SEARCH_KEYS:
+        try:
+            r = requests.post(
+                f"{SERPER_API}/images",
+                headers={"X-API-KEY": k, "Content-Type": "application/json"},
+                json={"q": query, "num": num}, timeout=12,
+            )
+            if r.status_code == 200:
+                return r.json()
+            last = f"Images HTTP {r.status_code}"
+        except Exception as e:
+            last = str(e)
+    raise RuntimeError(last)
 
 def web_context(d):
     parts = []
@@ -289,15 +302,13 @@ def web_context(d):
         "If they do not contain the answer, say so.]\n" + "\n".join(parts)
     )
 
-
 # ------------------------------------------------------------------
-#  Weather + Crypto
+#  Weather + Crypto (NO location permission — city names only)
 # ------------------------------------------------------------------
 def weather(city):
     g = requests.get(
         "https://geocoding-api.open-meteo.com/v1/search",
-        params={"count": 1, "name": city},
-        timeout=10,
+        params={"count": 1, "name": city}, timeout=10,
     ).json()
     p = (g.get("results") or [None])[0]
     if not p:
@@ -308,8 +319,7 @@ def weather(city):
             "latitude": p["latitude"],
             "longitude": p["longitude"],
             "current": "temperature_2m,wind_speed_10m,weather_code",
-        },
-        timeout=10,
+        }, timeout=10,
     ).json()["current"]
     return {
         "name": p["name"] + (", " + p["country"] if p.get("country") else ""),
@@ -317,7 +327,6 @@ def weather(city):
         "w": w["wind_speed_10m"],
         "s": _wx_text(w["weather_code"]),
     }
-
 
 def _wx_text(code):
     if code == 0: return "Clear sky"
@@ -330,11 +339,11 @@ def _wx_text(code):
     if code < 95: return "Snow showers"
     return "Thunderstorm"
 
-
-COINS = {"bitcoin": ["Bitcoin", "btc"], "ethereum": ["Ethereum", "eth"],
-         "solana": ["Solana", "sol"], "dogecoin": ["Dogecoin", "doge"],
-         "ripple": ["XRP", "xrp"]}
-
+COINS = {
+    "bitcoin": ["Bitcoin", "btc"], "ethereum": ["Ethereum", "eth"],
+    "solana": ["Solana", "sol"], "dogecoin": ["Dogecoin", "doge"],
+    "ripple": ["XRP", "xrp"],
+}
 
 def crypto_prices(ids):
     r = requests.get(
@@ -351,9 +360,8 @@ def crypto_prices(ids):
         "chg": d[i].get("inr_24h_change"),
     } for i in ids if i in d]
 
-
 # ------------------------------------------------------------------
-#  Image generation (backup Gemini keys, per-device limit in localStorage)
+#  Image generation (backup Gemini keys)
 # ------------------------------------------------------------------
 def make_image(prompt):
     if not BACKUP_KEYS:
@@ -386,9 +394,8 @@ def make_image(prompt):
                 last_err = str(e)
     raise RuntimeError(last_err)
 
-
 # ------------------------------------------------------------------
-#  Router (mirrors the Android script.js logic)
+#  Router
 # ------------------------------------------------------------------
 RE_GENV = re.compile(r"\b(generate|create|make|draw|design|paint|render|imagine|banao|banado)\b", re.I)
 RE_GENN = re.compile(r"\b(images?|pictures?|pics?|photos?|logo|poster|wallpaper|painting|illustration|artwork)\b", re.I)
@@ -397,7 +404,6 @@ RE_IMG  = re.compile(r"\b(images?|photos?|pictures?|pics?|wallpapers?)\b", re.I)
 RE_WX   = re.compile(r"\b(weather|temperature|mausam)\b", re.I)
 RE_CX   = re.compile(r"\b(price|rate|worth|cost|value|how much|trading)\b", re.I)
 RE_WEB  = re.compile(r"\b(latest|news|headlines|currently|right now|who won|release date|samachar|khabar|taaza)\b", re.I)
-
 
 def route(text):
     if RE_GENV.search(text) and RE_GENN.search(text) and not RE_GENX.search(text):
@@ -415,7 +421,6 @@ def route(text):
         return {"k": "web", "q": text}
     return {"k": "chat"}
 
-
 # ------------------------------------------------------------------
 #  Prompt building
 # ------------------------------------------------------------------
@@ -427,32 +432,26 @@ def build_messages(model_name, msgs, ctx="", attachment=None):
     for m in hist:
         out.append({"role": "assistant" if m["role"] == "model" else "user", "content": m["content"]})
     if attachment and out:
-        last = out[-1]
-        if isinstance(last["content"], str):
-            last["content"] += "\n\n" + attachment
-        else:
-            last["content"][0]["text"] += "\n\n" + attachment
+        out[-1]["content"] += "\n\n" + attachment
     if ctx and out:
         out[-1]["content"] += ctx
     while len(out) > 1 and out[1]["role"] == "assistant":
         out.pop(1)
     return out
 
-
 # ------------------------------------------------------------------
-#  Main chat endpoint — streaming NDJSON
+#  Chat endpoint — streaming NDJSON
 # ------------------------------------------------------------------
 def sse(payload):
     return json.dumps(payload) + "\n"
-
 
 @app.route("/api/chat", methods=["POST"])
 @rate_guard
 def chat():
     data = request.get_json(silent=True) or {}
     model_name = data.get("model") or "UB Flash 3.5"
-    history = data.get("messages") or []
-    text = (data.get("message") or "").strip()
+    history    = data.get("messages") or []
+    text       = (data.get("message") or "").strip()
     attachment_text = data.get("attachment_text") or ""
 
     if not text and not attachment_text:
@@ -460,7 +459,7 @@ def chat():
 
     r = route(text or attachment_text)
 
-    # Non-AI routes first
+    # Non-AI routes
     if r["k"] == "wx":
         try:
             d = weather(r["q"]) if r["q"] else None
@@ -477,33 +476,42 @@ def chat():
     if r["k"] == "cx":
         try:
             prices = crypto_prices(r["ids"])
-            return jsonify({"kind": "crypto", "data": prices,
-                            "text": "[Live crypto] " + "; ".join(f"{p['name']}: ₹{p['inr']} / ${p['usd']}" for p in prices)})
+            return jsonify({
+                "kind": "crypto", "data": prices,
+                "text": "[Live crypto] " + "; ".join(
+                    f"{p['name']}: ₹{p['inr']} / ${p['usd']}" for p in prices),
+            })
         except Exception as e:
             return jsonify({"error": str(e)}), 502
 
     if r["k"] == "gen":
         try:
             url = make_image(r["q"])
-            return jsonify({"kind": "image", "url": url, "text": f'Image made for: "{r["q"][:80]}"'})
+            return jsonify({
+                "kind": "image", "url": url,
+                "text": f'Image made for: "{r["q"][:80]}"',
+            })
         except Exception as e:
             return jsonify({"error": str(e)}), 502
 
     if r["k"] == "img":
         try:
-            d = serper_search(r["q"], r["n"])
-            images = [{"url": x.get("imageUrl") or x.get("link"),
-                       "thumb": x.get("thumbnailUrl") or x.get("imageUrl"),
-                       "title": x.get("title") or "image",
-                       "link": x.get("link")} for x in (d.get("images") or [])[:r["n"]]]
-            return jsonify({"kind": "images", "images": images,
-                            "text": f'[Image results for "{r["q"]}"]'})
+            d = serper_images(r["q"], r["n"])
+            images = [{
+                "url":   x.get("imageUrl") or x.get("link"),
+                "thumb": x.get("thumbnailUrl") or x.get("imageUrl"),
+                "title": x.get("title") or "image",
+                "link":  x.get("link"),
+            } for x in (d.get("images") or [])[:r["n"]]]
+            return jsonify({
+                "kind": "images", "images": images,
+                "text": f'[Image results for "{r["q"]}"]',
+            })
         except Exception as e:
             return jsonify({"error": str(e)}), 502
 
-    # AI path (chat / web / file)
-    ctx = ""
-    sources = []
+    # AI path
+    ctx, sources = "", []
     if r["k"] == "web":
         try:
             d = serper_search(r["q"])
@@ -512,12 +520,15 @@ def chat():
         except Exception:
             pass
 
-    messages = build_messages(model_name, history + [{"role": "user", "content": text or "Summarise this file."}],
-                              ctx=ctx, attachment=attachment_text)
+    messages = build_messages(
+        model_name,
+        history + [{"role": "user", "content": text or "Summarise this file."}],
+        ctx=ctx, attachment=attachment_text,
+    )
 
     def generate():
         yield sse({"type": "sources", "sources": sources})
-        # Try primary (Groq), fall back to Gemini backup, then spare Groq key
+        # 1) Primary: Groq
         try:
             for tok in try_groq(model_name, messages):
                 yield sse({"type": "delta", "text": tok})
@@ -526,9 +537,12 @@ def chat():
         except Exception as e:
             print("Primary failed:", e)
 
+        # 2) Backup: Gemini
         if BACKUP_KEYS:
-            contents = [{"role": "user" if m["role"] == "user" else "model",
-                         "parts": [{"text": m["content"]}]} for m in messages[1:]]
+            contents = [{
+                "role": "user" if m["role"] == "user" else "model",
+                "parts": [{"text": m["content"]}],
+            } for m in messages[1:]]
             start = int(time.time()) % len(BACKUP_KEYS)
             for i in range(min(len(BACKUP_KEYS), 6)):
                 try:
@@ -540,6 +554,7 @@ def chat():
                     print("Gemini fallback:", e)
                     continue
 
+        # 3) Spare Groq key
         spare = GROQ_KEYS.get("spare", "")
         if spare:
             try:
@@ -550,13 +565,13 @@ def chat():
             except Exception as e:
                 print("Spare failed:", e)
 
-        yield sse({"type": "error", "error": "Couldn't get a response right now. Please tap Retry."})
+        yield sse({"type": "error",
+                   "error": "Couldn't get a response right now. Please tap Retry."})
 
     return app.response_class(generate(), mimetype="application/x-ndjson")
 
-
 # ------------------------------------------------------------------
-#  Speech-to-text (Whisper on Groq)
+#  Speech-to-text (Groq Whisper)
 # ------------------------------------------------------------------
 @app.route("/api/transcribe", methods=["POST"])
 @rate_guard
@@ -568,9 +583,8 @@ def transcribe():
     if not f:
         return jsonify({"error": "No audio"}), 400
     lang = request.form.get("language", "en")[:2]
-
     files = {"file": (f.filename or "voice.webm", f.read(), f.mimetype or "audio/webm")}
-    data = {"model": WHISPER_MODEL, "language": lang}
+    data  = {"model": WHISPER_MODEL, "language": lang}
     r = requests.post(f"{GROQ_API}/audio/transcriptions",
                       headers={"Authorization": f"Bearer {key}"},
                       files=files, data=data, timeout=60)
@@ -578,12 +592,13 @@ def transcribe():
         return jsonify({"error": err_text(r.text)}), 502
     return jsonify({"text": (r.json().get("text") or "").strip()})
 
-
 # ------------------------------------------------------------------
-#  File reading (image, PDF, ZIP, text)
+#  File upload (image, PDF, ZIP, text/code)
 # ------------------------------------------------------------------
-TEXT_EXT = re.compile(r"\.(txt|md|json|csv|tsv|js|jsx|ts|tsx|py|html?|css|scss|java|kt|c|h|cpp|hpp|cs|go|rs|php|rb|sh|bat|ya?ml|xml|sql|swift|dart|lua|r|toml|ini|env|gradle|vue|svelte|log)$", re.I)
-
+TEXT_EXT = re.compile(
+    r"\.(txt|md|json|csv|tsv|js|jsx|ts|tsx|py|html?|css|scss|java|kt|c|h|cpp|hpp|cs|go|rs|php|rb|sh|bat|ya?ml|xml|sql|swift|dart|lua|r|toml|ini|env|gradle|vue|svelte|log)$",
+    re.I,
+)
 
 @app.route("/api/upload", methods=["POST"])
 @rate_guard
@@ -600,19 +615,21 @@ def upload():
 
     try:
         if mime == "application/pdf" or name.lower().endswith(".pdf"):
-            b64 = base64.b64encode(raw).decode()
             return jsonify({"name": name, "mime": "application/pdf",
-                            "text": f"[PDF: {name}]", "base64": b64})
+                            "text": f"[PDF: {name}]",
+                            "base64": base64.b64encode(raw).decode()})
 
         if mime.startswith("image/"):
-            b64 = base64.b64encode(raw).decode()
-            return jsonify({"name": name, "mime": mime, "text": f"[Image: {name}]", "base64": b64})
+            return jsonify({"name": name, "mime": mime,
+                            "text": f"[Image: {name}]",
+                            "base64": base64.b64encode(raw).decode()})
 
         if name.lower().endswith(".zip") or "zip" in mime:
             zf = zipfile.ZipFile(io.BytesIO(raw))
             skip = re.compile(r"(^|/)(node_modules|\.git|dist|build|__pycache__|\.idea|\.vscode)/", re.I)
             names = [n for n in zf.namelist() if not n.endswith("/") and not skip.search(n)]
-            out = f"[ZIP: {name}, {len(names)} files]\nFile list:\n" + "\n".join("- " + n for n in names[:300]) + "\n"
+            out = f"[ZIP: {name}, {len(names)} files]\nFile list:\n" + \
+                  "\n".join("- " + n for n in names[:300]) + "\n"
             used = 0
             for n in names:
                 if not TEXT_EXT.search(n) or used > 70000:
@@ -627,16 +644,16 @@ def upload():
 
         if TEXT_EXT.search(name) or mime.startswith("text/") or mime == "application/json":
             txt = raw.decode("utf-8", "ignore")[:60000]
-            return jsonify({"name": name, "mime": "text/plain", "text": f"[File: {name}]\n{txt}"})
+            return jsonify({"name": name, "mime": "text/plain",
+                            "text": f"[File: {name}]\n{txt}"})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
     return jsonify({"error": "Unsupported file. Try an image, PDF, ZIP or text/code file."}), 415
 
-
 # ------------------------------------------------------------------
-#  Frontend (single HTML page — same UI as the Android WebView)
+#  Frontend (single HTML page inlined)
 # ------------------------------------------------------------------
 INDEX_HTML = r"""<!DOCTYPE html>
 <html lang="en">
@@ -645,7 +662,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
 <meta name="theme-color" content="#3b6cf6">
 <title>UB Chat</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='78' font-size='78'>🦄</text></svg>">
+<link rel="icon" type="image/png" href="/logo.png">
+<link rel="apple-touch-icon" href="/logo.png">
+<meta property="og:image" content="/logo.png">
+<meta property="og:title" content="UB Chat">
+<meta property="og:description" content="Fast AI chat. Your chats stay on your device.">
 <style>
 *{box-sizing:border-box;margin:0}
 :root{color-scheme:light;--bg:#f5f6fa;--card:#fff;--tx:#141b34;--mu:#6b7280;--bd:#e6e8ef;--ac:#3b6cf6;--ac2:#ff6b00;--sh:0 2px 10px rgba(20,27,52,.06)}
@@ -656,6 +677,7 @@ button,select,textarea,input{font:inherit;color:inherit}
 button{cursor:pointer;border:0;background:none}
 #side{width:270px;background:var(--card);display:flex;flex-direction:column;padding:12px;gap:4px;border-right:1px solid var(--bd)}
 .brand{display:flex;align-items:center;gap:10px;padding:6px 8px 12px;border-bottom:1px solid var(--bd);margin-bottom:6px}
+.brand img{width:36px;height:36px;object-fit:contain}
 .brand b{font-size:16px}
 .new{padding:11px 14px;border-radius:14px;text-align:left;font-weight:700;background:var(--ac);color:#fff;margin-bottom:6px}
 #list{flex:1;overflow:auto;display:flex;flex-direction:column;gap:2px}
@@ -671,7 +693,8 @@ button{cursor:pointer;border:0;background:none}
 .m{margin:16px 0;display:flex;gap:10px}
 .m.u{justify-content:flex-end}
 .m.u .b{background:linear-gradient(135deg,var(--ac),#6c8cff);color:#fff;padding:10px 16px;border-radius:20px 20px 6px 20px;max-width:85%;white-space:pre-wrap}
-.av{width:34px;height:34px;border-radius:10px;flex:none;background:var(--card);border:1px solid var(--bd);display:flex;align-items:center;justify-content:center}
+.av{width:34px;height:34px;border-radius:10px;flex:none;background:var(--card);border:1px solid var(--bd);display:flex;align-items:center;justify-content:center;overflow:hidden}
+.av img{width:100%;height:100%;object-fit:contain;padding:2px}
 .m.a .b{flex:1;min-width:0;overflow-wrap:anywhere}
 .b code{background:var(--bg);padding:1px 6px;border-radius:6px;font:.88em ui-monospace,monospace}
 .code{background:var(--card);border:1px solid var(--bd);border-radius:14px;margin:10px 0;overflow:hidden}
@@ -680,29 +703,28 @@ button{cursor:pointer;border:0;background:none}
 .card{background:var(--card);border-radius:16px;padding:14px 16px;box-shadow:var(--sh);margin:8px 0}
 .card .big{font-size:34px;font-weight:700}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin:8px 0}
-.gi{position:relative;border-radius:12px;overflow:hidden;background:var(--bd);display:block}
+.gi{position:relative;border-radius:12px;overflow:hidden;background:var(--bd);display:block;color:inherit;text-decoration:none}
 .gi img{width:100%;aspect-ratio:1;object-fit:cover;display:block}
 .gi .ttl{display:block;padding:6px 8px;background:var(--card);font-size:11.5px}
 #bar{padding:4px 12px 12px}
-#box{max-width:780px;margin:0 auto;display:flex;align-items:flex-end;gap:8px;background:var(--card);border-radius:26px;padding:8px 8px 8px 8px;box-shadow:0 4px 18px rgba(20,27,52,.1);border:1px solid var(--bd)}
+#box{max-width:780px;margin:0 auto;display:flex;align-items:flex-end;gap:8px;background:var(--card);border-radius:26px;padding:8px;box-shadow:0 4px 18px rgba(20,27,52,.1);border:1px solid var(--bd)}
 #in{flex:1;border:0;background:none;outline:0;resize:none;max-height:180px;padding:8px 0;line-height:1.5}
 #go{width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,var(--ac),#6c8cff);color:#fff;font-size:19px;flex:none;display:flex;align-items:center;justify-content:center}
 #go:active{transform:scale(.92)}
 #empty{text-align:center;margin-top:6vh}
+#empty img{width:130px;height:130px;object-fit:contain}
 #empty h1{font-size:28px;font-weight:800}
 #empty h1 span{background:linear-gradient(90deg,var(--ac2),var(--ac),#138808);-webkit-background-clip:text;background-clip:text;color:transparent}
 #empty p{color:var(--mu);margin:4px 0 18px}
 .chip{display:inline-block;background:var(--card);border:1px solid var(--bd);border-radius:20px;padding:6px 14px;font-size:14px;margin:4px 6px 4px 0}
 #toast{position:fixed;left:50%;bottom:96px;transform:translateX(-50%);background:var(--tx);color:var(--bg);padding:9px 16px;border-radius:12px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:60}
 #toast.on{opacity:1}
-.skeleton{display:inline-block;height:14px;width:120px;background:linear-gradient(90deg,var(--bd) 25%,var(--bg) 50%,var(--bd) 75%);background-size:200% 100%;animation:sk 1.2s infinite;border-radius:6px}
-@keyframes sk{0%{background-position:200% 0}100%{background-position:-200% 0}}
 @media(max-width:800px){#side{display:none}.m.a .b{font-size:16px}}
 </style>
 </head>
 <body>
 <aside id="side">
-  <div class="brand"><b>🦄 UB Chat</b></div>
+  <div class="brand"><img src="/logo.png" alt="UB Chat"><b>UB Chat</b></div>
   <button class="new" id="new">+ New chat</button>
   <div id="list"></div>
 </aside>
@@ -749,12 +771,12 @@ function md(t){
 function bubble(m){
   if(m.role==="user")return '<div class="m u"><div class="b">'+E(m.content)+"</div></div>";
   const body=m.err?'<span style="color:#e0453b">'+E(m.content)+"</span>":md(m.content||"");
-  return '<div class="m a"><i class="av">🦄</i><div class="b">'+body+"</div></div>";
+  return '<div class="m a"><i class="av"><img src="/logo.png" alt="UB"></i><div class="b">'+body+"</div></div>";
 }
 function render(){
   const c=getChat();
   if(!c||!c.msgs.length){
-    $("w").innerHTML='<div id="empty"><h1>Hello. <span>How can I help?</span></h1><p>Chats stay in your browser.</p>'+
+    $("w").innerHTML='<div id="empty"><img src="/logo.png" alt="UB Chat"><h1>Hello. <span>How can I help?</span></h1><p>Chats stay in your browser.</p>'+
       ["What's the weather in London?","Photos of the Taj Mahal","Latest technology news","Explain recursion with code"].map(x=>'<button class="chip ex">'+x+"</button>").join("")+"</div>";
   } else $("w").innerHTML=c.msgs.map(bubble).join("");
   $("msgs").scrollTop=$("msgs").scrollHeight;
@@ -789,17 +811,17 @@ $("mic").onclick=async()=>{
     const mr=new MediaRecorder(st);const chunks=[];
     mr.ondataavailable=e=>{if(e.data.size)chunks.push(e.data)};
     mr.onstop=async()=>{st.getTracks().forEach(t=>t.stop());
+      $("mic").textContent="🎙️";rec=null;
       const blob=new Blob(chunks,{type:mr.mimeType||"audio/webm"});
       if(blob.size<1500)return toast("Didn't catch that.");
       toast("Converting voice…");
-      const fd=new FormData();fd.append("file",blob,"voice.webm");fd.append("language",navigator.language.slice(0,2)||"en");
+      const fd=new FormData();fd.append("file",blob,"voice.webm");fd.append("language",(navigator.language||"en").slice(0,2));
       const r=await fetch("/api/transcribe",{method:"POST",body:fd});
       const j=await r.json();
       if(!r.ok)return toast(j.error||"STT failed");
       inp.value+=(inp.value?" ":"")+j.text;inp.focus();
     };
     mr.start();rec=mr;$("mic").textContent="⏹";toast("Listening… tap again to stop");
-    mr.onstop=((orig)=>(...a)=>{$("mic").textContent="🎙️";rec=null;return orig(...a)})(mr.onstop);
   }catch(e){toast("Mic permission needed")}
 };
 async function send(txt){
@@ -819,7 +841,8 @@ async function send(txt){
     const r=await fetch("/api/chat",{method:"POST",signal:ctl.signal,
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({
-        model:$("model").value,message:userMsg.content,
+        model:$("model").value,
+        message:userMsg.content,
         messages:history,
         attachment_text: att?(att.text+(att.base64?"\n[Attached file: "+att.mime+"]":"")): ""
       })});
@@ -850,7 +873,6 @@ async function send(txt){
   }catch(e){if(e.name!=="AbortError"){m.err=true;m.content="Couldn't get a response. Try again."}}
   busy=false;setGo();save();render();
 }
-// simple clock
 setInterval(()=>{$("clock").textContent=new Date().toLocaleString("en-GB",{weekday:"short",day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"})},20000);
 render();
 </script>
@@ -858,13 +880,16 @@ render();
 </html>
 """
 
-
 @app.route("/")
 def index():
     return render_template_string(INDEX_HTML)
 
+# Logo — serves ./logo.png
+@app.route("/logo.png")
+def logo():
+    return send_from_directory(".", "logo.png", mimetype="image/png")
 
-# UptimeRobot ping + Render health check
+# Health / UptimeRobot ping
 @app.route("/health")
 def health():
     return jsonify({
@@ -876,15 +901,10 @@ def health():
         "rate_limit": f"{RATE_LIMIT_PER_MIN}/min per IP",
     })
 
-
 @app.route("/favicon.ico")
 def favicon():
     return ("", 204)
 
-
-# ------------------------------------------------------------------
-#  Local dev
-# ------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     print(f"UB Chat listening on :{port}")
