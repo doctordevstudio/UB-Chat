@@ -36,8 +36,6 @@ GROQ_KEYS = {
 }
 
 SEARCH_KEYS = [k.strip() for k in _env("SEARCH_KEYS").split(",") if k.strip()]
-
-# Accept both real newlines and literal \n (some dashboards single-line env vars)
 BACKUP_KEYS = [
     k.strip()
     for k in _env("BACKUP_KEYS", "").replace("\\n", "\n").splitlines()
@@ -56,13 +54,11 @@ MODELS = {
     },
     "UB Flash 3.5": {
         "id": "openai/gpt-oss-120b", "role": "brain", "effort": "low",
-        "history": 10,
-        "hint": "Give clear, helpful answers of medium length.",
+        "history": 10, "hint": "Give clear, helpful answers of medium length.",
     },
     "UB Flash 3.8": {
         "id": "openai/gpt-oss-120b", "role": "deep", "effort": "high",
-        "history": 12,
-        "hint": "Think carefully and give a complete, well-structured, detailed answer with reasons and examples.",
+        "history": 12, "hint": "Think carefully and give a complete, well-structured, detailed answer with reasons and examples.",
     },
 }
 
@@ -75,38 +71,28 @@ SYSTEM = (
     "Answer directly and concisely unless asked for detail. "
     "Put code in fenced code blocks with the language name. "
     "Write in the user's language. Use a friendly, helpful tone. "
-    "FORMAT RULES (the screen is a small phone): never put code inside a table; "
-    "never write HTML tags such as <br>; use a table only for short plain-text comparisons "
-    "with at most 3 columns, otherwise use short bullet lists or numbered steps; keep paragraphs short. "
-    "You cannot send files such as ZIP or PDF. If asked to, say so politely and offer to write the "
-    "content, code or steps in the chat instead. "
-    "If the user asks you to draw or make an image, tell them to write 'generate image of ...' in the message."
+    "FORMAT RULES: never put code inside a table; never write HTML tags such as <br>; "
+    "use a table only for short plain-text comparisons with at most 3 columns, otherwise use short bullet lists or numbered steps; "
+    "keep paragraphs short. You cannot send files such as ZIP or PDF. If asked to, say so politely and offer to write the "
+    "content, code or steps in the chat instead. If the user asks you to draw or make an image, tell them to write 'generate image of ...' in the message."
 )
-NAMEHINT = (
-    " If asked who made you or which model you are, say you are UB Chat (UBAI), "
-    "the user's own AI assistant, and never name any underlying model or company."
-)
+NAMEHINT = " If asked who made you or which model you are, say you are UB Chat (UBAI), the user's own AI assistant, and never name any underlying model or company."
 
 RATE_LIMIT_PER_MIN = int(_env("RATE_LIMIT_PER_MIN", "5"))
 RATE_WINDOW_SEC    = 60
 
-# ------------------------------------------------------------------
-#  Flask app
-# ------------------------------------------------------------------
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024  # 20 MB upload cap
+app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024
 
 # ------------------------------------------------------------------
-#  Rate limiting (per client IP — 5 requests / minute)
+#  Rate limiting
 # ------------------------------------------------------------------
 _rate_lock  = threading.Lock()
-_rate_state = defaultdict(list)  # ip -> list of timestamps
+_rate_state = defaultdict(list)
 
 def client_ip():
     fwd = request.headers.get("X-Forwarded-For", "")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.remote_addr or "unknown"
+    return fwd.split(",")[0].strip() if fwd else (request.remote_addr or "unknown")
 
 def rate_ok(ip):
     now = time.time()
@@ -121,18 +107,14 @@ def rate_ok(ip):
 
 def rate_guard(fn):
     def wrapper(*a, **k):
-        ip = client_ip()
-        if not rate_ok(ip):
-            return jsonify({
-                "error": f"Rate limit: {RATE_LIMIT_PER_MIN} requests per minute per user.",
-                "retry_after": RATE_WINDOW_SEC,
-            }), 429
+        if not rate_ok(client_ip()):
+            return jsonify({"error": f"Rate limit: {RATE_LIMIT_PER_MIN} req/min."}), 429
         return fn(*a, **k)
     wrapper.__name__ = fn.__name__
     return wrapper
 
 # ------------------------------------------------------------------
-#  Small helpers
+#  Helpers
 # ------------------------------------------------------------------
 def err_text(raw):
     try:
@@ -141,101 +123,69 @@ def err_text(raw):
     except Exception:
         return (raw or "Request failed")[:200]
 
-def strip_think(t):
-    t = re.sub(r"<think>[\s\S]*?</think>", "", t)
-    t = re.sub(r"<think>[\s\S]*$", "", t)
-    return t
-
 def now_str():
     return datetime.now(timezone.utc).strftime("%A, %d %B %Y, %H:%M UTC")
 
 # ------------------------------------------------------------------
-#  Groq streaming (primary AI)
+#  AI Streaming (Groq + Gemini)
 # ------------------------------------------------------------------
 def groq_stream(model_name, messages, key):
     cfg = MODELS.get(model_name, MODELS["UB Flash 3.5"])
     payload = {"model": cfg["id"], "messages": messages, "stream": True}
-    if cfg.get("effort"):
-        payload["reasoning_effort"] = cfg["effort"]
-    if cfg.get("tokens"):
-        payload["max_completion_tokens"] = cfg["tokens"]
+    if cfg.get("effort"): payload["reasoning_effort"] = cfg["effort"]
+    if cfg.get("tokens"): payload["max_completion_tokens"] = cfg["tokens"]
 
-    r = requests.post(
-        f"{GROQ_API}/chat/completions",
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
-        json=payload, stream=True, timeout=30,
-    )
-    if r.status_code != 200:
-        raise RuntimeError(err_text(r.text))
+    r = requests.post(f"{GROQ_API}/chat/completions", headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"}, json=payload, stream=True, timeout=30)
+    if r.status_code != 200: raise RuntimeError(err_text(r.text))
 
     for line in r.iter_lines(decode_unicode=True):
-        if not line or not line.startswith("data:"):
-            continue
+        if not line or not line.startswith("data:"): continue
         chunk = line[5:].strip()
-        if chunk == "[DONE]":
-            break
+        if chunk == "[DONE]": break
         try:
             d = json.loads(chunk)
             delta = d["choices"][0]["delta"]
-            if delta.get("content"):
-                yield delta["content"]
-        except Exception:
-            continue
+            if delta.get("content"): yield delta["content"]
+        except Exception: continue
 
 def try_groq(model_name, messages):
-    """Try primary key for the model, then brain, then speed, then deep."""
     cfg = MODELS.get(model_name, MODELS["UB Flash 3.5"])
     order = [cfg["role"], "brain", "speed", "deep"]
     seen = set()
     for role in order:
         k = GROQ_KEYS.get(role, "").strip()
-        if not k or k in seen:
-            continue
+        if not k or k in seen: continue
         seen.add(k)
         try:
             buf = ""
             for tok in groq_stream(model_name, messages, k):
                 buf += tok
                 yield tok
-            if buf.strip():
-                return
+            if buf.strip(): return
         except Exception as e:
             print("groq fallback:", e)
             continue
     raise RuntimeError("Primary AI unavailable")
 
-# ------------------------------------------------------------------
-#  Gemini streaming (backup AI, plus image generation)
-# ------------------------------------------------------------------
 def gemini_stream(model_name, contents, key):
     cfg = MODELS.get(model_name, MODELS["UB Flash 3.5"])
-    think = {"UB Quick Flash 2.4": "minimal",
-             "UB Flash 3.5": "low",
-             "UB Flash 3.8": "low"}.get(model_name, "low")
+    think = {"UB Quick Flash 2.4": "minimal", "UB Flash 3.5": "low", "UB Flash 3.8": "low"}.get(model_name, "low")
     sys = SYSTEM + NAMEHINT + " " + cfg["hint"] + " Current date and time: " + now_str() + "."
     body = {
         "systemInstruction": {"parts": [{"text": sys}]},
         "contents": contents,
         "generationConfig": {"thinkingConfig": {"thinkingLevel": think}},
     }
-    r = requests.post(
-        f"{GEMINI_API}/gemini-3.5-flash:streamGenerateContent?alt=sse",
-        headers={"Content-Type": "application/json", "x-goog-api-key": key},
-        json=body, stream=True, timeout=45,
-    )
-    if r.status_code != 200:
-        raise RuntimeError(err_text(r.text))
+    r = requests.post(f"{GEMINI_API}/gemini-3.5-flash:streamGenerateContent?alt=sse", headers={"Content-Type": "application/json", "x-goog-api-key": key}, json=body, stream=True, timeout=45)
+    if r.status_code != 200: raise RuntimeError(err_text(r.text))
     for line in r.iter_lines(decode_unicode=True):
-        if not line or not line.startswith("data:"):
-            continue
+        if not line or not line.startswith("data:"): continue
         try:
             j = json.loads(line[5:])
             parts = (j.get("candidates") or [{}])[0].get("content", {}).get("parts") or []
             for p in parts:
-                if p.get("text") and not p.get("thought"):
-                    yield p["text"]
-        except Exception:
-            continue
+                if p.get("text") and not p.get("thought"): yield p["text"]
+        except Exception: continue
 
 # ------------------------------------------------------------------
 #  Search (Serper)
@@ -247,90 +197,52 @@ def serper_search(query, num=6):
     ck = query.lower() + "|" + str(num)
     with _search_lock:
         hit = _search_cache.get(ck)
-        if hit and time.time() - hit[0] < 1800:
-            return hit[1]
-
-    if not SEARCH_KEYS:
-        raise RuntimeError("Search not configured")
-
+        if hit and time.time() - hit[0] < 1800: return hit[1]
+    if not SEARCH_KEYS: raise RuntimeError("Search not configured")
     last = "Search unavailable"
     for k in SEARCH_KEYS:
         try:
-            r = requests.post(
-                f"{SERPER_API}/search",
-                headers={"X-API-KEY": k, "Content-Type": "application/json"},
-                json={"q": query, "num": num}, timeout=12,
-            )
+            r = requests.post(f"{SERPER_API}/search", headers={"X-API-KEY": k, "Content-Type": "application/json"}, json={"q": query, "num": num}, timeout=12)
             if r.status_code == 200:
                 data = r.json()
-                with _search_lock:
-                    _search_cache[ck] = (time.time(), data)
+                with _search_lock: _search_cache[ck] = (time.time(), data)
                 return data
             last = f"Search HTTP {r.status_code}"
-        except Exception as e:
-            last = str(e)
+        except Exception as e: last = str(e)
     raise RuntimeError(last)
 
 def serper_images(query, num=9):
-    if not SEARCH_KEYS:
-        raise RuntimeError("Search not configured")
+    if not SEARCH_KEYS: raise RuntimeError("Search not configured")
     last = "Search unavailable"
     for k in SEARCH_KEYS:
         try:
-            r = requests.post(
-                f"{SERPER_API}/images",
-                headers={"X-API-KEY": k, "Content-Type": "application/json"},
-                json={"q": query, "num": num}, timeout=12,
-            )
-            if r.status_code == 200:
-                return r.json()
+            r = requests.post(f"{SERPER_API}/images", headers={"X-API-KEY": k, "Content-Type": "application/json"}, json={"q": query, "num": num}, timeout=12)
+            if r.status_code == 200: return r.json()
             last = f"Images HTTP {r.status_code}"
-        except Exception as e:
-            last = str(e)
+        except Exception as e: last = str(e)
     raise RuntimeError(last)
 
 def web_context(d):
     parts = []
     ab = d.get("answerBox")
-    if ab:
-        parts.append("Featured answer: " + (ab.get("answer") or ab.get("snippet") or ab.get("title") or ""))
+    if ab: parts.append("Featured answer: " + (ab.get("answer") or ab.get("snippet") or ab.get("title") or ""))
     for i, o in enumerate((d.get("organic") or [])[:6], 1):
         parts.append(f"{i}. {o.get('title','')} — {o.get('snippet','')} ({o.get('link','')})")
-    return (
-        "\n\n[LIVE WEB RESULTS from Google, retrieved just now. Answer the question above using them. "
-        "Be accurate and concise, use short paragraphs or bullets, and do not state facts the results do not support. "
-        "If they do not contain the answer, say so.]\n" + "\n".join(parts)
-    )
+    return ("\n\n[LIVE WEB RESULTS from Google. Answer the question above using them. Be concise.]\n" + "\n".join(parts))
 
 # ------------------------------------------------------------------
-#  Weather + Crypto (NO location permission — city names only)
+#  Live Data (Weather + Crypto)
 # ------------------------------------------------------------------
 def weather(city):
-    g = requests.get(
-        "https://geocoding-api.open-meteo.com/v1/search",
-        params={"count": 1, "name": city}, timeout=10,
-    ).json()
+    g = requests.get("https://geocoding-api.open-meteo.com/v1/search", params={"count": 1, "name": city}, timeout=10).json()
     p = (g.get("results") or [None])[0]
-    if not p:
-        raise RuntimeError("City not found: " + city)
-    w = requests.get(
-        "https://api.open-meteo.com/v1/forecast",
-        params={
-            "latitude": p["latitude"],
-            "longitude": p["longitude"],
-            "current": "temperature_2m,wind_speed_10m,weather_code",
-        }, timeout=10,
-    ).json()["current"]
-    return {
-        "name": p["name"] + (", " + p["country"] if p.get("country") else ""),
-        "t": w["temperature_2m"],
-        "w": w["wind_speed_10m"],
-        "s": _wx_text(w["weather_code"]),
-    }
+    if not p: raise RuntimeError("City not found: " + city)
+    w = requests.get("https://api.open-meteo.com/v1/forecast", params={"latitude": p["latitude"], "longitude": p["longitude"], "current": "temperature_2m,wind_speed_10m,weather_code"}, timeout=10).json()["current"]
+    return {"name": p["name"] + (", " + p["country"] if p.get("country") else ""), "t": w["temperature_2m"], "w": w["wind_speed_10m"], "s": _wx_text(w["weather_code"])}
 
 def _wx_text(code):
     if code == 0: return "Clear sky"
-    if code < 4:  return "Partly cloudy"
+    if code < 4: return "Partly cloudy"
     if code < 50: return "Fog"
     if code < 60: return "Drizzle"
     if code < 70: return "Rain"
@@ -339,59 +251,34 @@ def _wx_text(code):
     if code < 95: return "Snow showers"
     return "Thunderstorm"
 
-COINS = {
-    "bitcoin": ["Bitcoin", "btc"], "ethereum": ["Ethereum", "eth"],
-    "solana": ["Solana", "sol"], "dogecoin": ["Dogecoin", "doge"],
-    "ripple": ["XRP", "xrp"],
-}
+COINS = {"bitcoin": ["Bitcoin", "btc"], "ethereum": ["Ethereum", "eth"], "solana": ["Solana", "sol"], "dogecoin": ["Dogecoin", "doge"], "ripple": ["XRP", "xrp"]}
 
 def crypto_prices(ids):
-    r = requests.get(
-        "https://api.coingecko.com/api/v3/simple/price",
-        params={"vs_currencies": "inr,usd", "include_24hr_change": "true", "ids": ",".join(ids)},
-        timeout=12,
-    )
-    if r.status_code != 200:
-        raise RuntimeError("Price service busy")
+    r = requests.get("https://api.coingecko.com/api/v3/simple/price", params={"vs_currencies": "inr,usd", "include_24hr_change": "true", "ids": ",".join(ids)}, timeout=12)
+    if r.status_code != 200: raise RuntimeError("Price service busy")
     d = r.json()
-    return [{
-        "name": COINS[i][0],
-        "inr": d[i]["inr"], "usd": d[i]["usd"],
-        "chg": d[i].get("inr_24h_change"),
-    } for i in ids if i in d]
+    return [{"name": COINS[i][0], "inr": d[i]["inr"], "usd": d[i]["usd"], "chg": d[i].get("inr_24h_change")} for i in ids if i in d]
 
 # ------------------------------------------------------------------
-#  Image generation (backup Gemini keys)
+#  Image Gen
 # ------------------------------------------------------------------
 def make_image(prompt):
-    if not BACKUP_KEYS:
-        raise RuntimeError("Image making is not set up")
-    body = {
-        "contents": [{"role": "user", "parts": [{"text": "Create an image: " + prompt}]}],
-        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
-    }
+    if not BACKUP_KEYS: raise RuntimeError("Image making not set up")
+    body = {"contents": [{"role": "user", "parts": [{"text": "Create an image: " + prompt}]}], "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]}}
     last_err = "Image generation failed"
     start = int(time.time()) % len(BACKUP_KEYS)
     for mod in IMAGE_MODELS:
         for i in range(min(len(BACKUP_KEYS), 8)):
             k = BACKUP_KEYS[(start + i) % len(BACKUP_KEYS)]
             try:
-                r = requests.post(
-                    f"{GEMINI_API}/{mod}:generateContent",
-                    headers={"Content-Type": "application/json", "x-goog-api-key": k},
-                    json=body, timeout=45,
-                )
-                if r.status_code != 200:
-                    last_err = err_text(r.text)
-                    continue
+                r = requests.post(f"{GEMINI_API}/{mod}:generateContent", headers={"Content-Type": "application/json", "x-goog-api-key": k}, json=body, timeout=45)
+                if r.status_code != 200: last_err = err_text(r.text); continue
                 j = r.json()
                 parts = ((j.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
                 for p in parts:
                     d = p.get("inlineData") or p.get("inline_data")
-                    if d:
-                        return "data:" + (d.get("mimeType") or d.get("mime_type") or "image/png") + ";base64," + d["data"]
-            except Exception as e:
-                last_err = str(e)
+                    if d: return "data:" + (d.get("mimeType") or d.get("mime_type") or "image/png") + ";base64," + d["data"]
+            except Exception as e: last_err = str(e)
     raise RuntimeError(last_err)
 
 # ------------------------------------------------------------------
@@ -422,7 +309,7 @@ def route(text):
     return {"k": "chat"}
 
 # ------------------------------------------------------------------
-#  Prompt building
+#  Prompt Build
 # ------------------------------------------------------------------
 def build_messages(model_name, msgs, ctx="", attachment=None):
     cfg = MODELS.get(model_name, MODELS["UB Flash 3.5"])
@@ -431,19 +318,15 @@ def build_messages(model_name, msgs, ctx="", attachment=None):
     out = [{"role": "system", "content": sys}]
     for m in hist:
         out.append({"role": "assistant" if m["role"] == "model" else "user", "content": m["content"]})
-    if attachment and out:
-        out[-1]["content"] += "\n\n" + attachment
-    if ctx and out:
-        out[-1]["content"] += ctx
-    while len(out) > 1 and out[1]["role"] == "assistant":
-        out.pop(1)
+    if attachment and out: out[-1]["content"] += "\n\n" + attachment
+    if ctx and out: out[-1]["content"] += ctx
+    while len(out) > 1 and out[1]["role"] == "assistant": out.pop(1)
     return out
 
 # ------------------------------------------------------------------
-#  Chat endpoint — streaming NDJSON
+#  Chat Endpoint
 # ------------------------------------------------------------------
-def sse(payload):
-    return json.dumps(payload) + "\n"
+def sse(payload): return json.dumps(payload) + "\n"
 
 @app.route("/api/chat", methods=["POST"])
 @rate_guard
@@ -454,95 +337,57 @@ def chat():
     text       = (data.get("message") or "").strip()
     attachment_text = data.get("attachment_text") or ""
 
-    if not text and not attachment_text:
-        return jsonify({"error": "Empty message"}), 400
+    if not text and not attachment_text: return jsonify({"error": "Empty message"}), 400
 
     r = route(text or attachment_text)
 
-    # Non-AI routes
     if r["k"] == "wx":
         try:
             d = weather(r["q"]) if r["q"] else None
-            if not d:
-                return jsonify({"error": "Ask like: weather in Delhi"}), 400
-            return jsonify({
-                "kind": "weather",
-                "data": d,
-                "text": f"[Live weather] {d['name']}: {d['t']}°C, {d['s']}, wind {d['w']} km/h.",
-            })
-        except Exception as e:
-            return jsonify({"error": str(e)}), 502
+            if not d: return jsonify({"error": "Ask like: weather in Delhi"}), 400
+            return jsonify({"kind": "weather", "data": d, "text": f"[Live weather] {d['name']}: {d['t']}°C, {d['s']}, wind {d['w']} km/h."})
+        except Exception as e: return jsonify({"error": str(e)}), 502
 
     if r["k"] == "cx":
         try:
             prices = crypto_prices(r["ids"])
-            return jsonify({
-                "kind": "crypto", "data": prices,
-                "text": "[Live crypto] " + "; ".join(
-                    f"{p['name']}: ₹{p['inr']} / ${p['usd']}" for p in prices),
-            })
-        except Exception as e:
-            return jsonify({"error": str(e)}), 502
+            return jsonify({"kind": "crypto", "data": prices, "text": "[Live crypto] " + "; ".join(f"{p['name']}: ₹{p['inr']} / ${p['usd']}" for p in prices)})
+        except Exception as e: return jsonify({"error": str(e)}), 502
 
     if r["k"] == "gen":
         try:
             url = make_image(r["q"])
-            return jsonify({
-                "kind": "image", "url": url,
-                "text": f'Image made for: "{r["q"][:80]}"',
-            })
-        except Exception as e:
-            return jsonify({"error": str(e)}), 502
+            return jsonify({"kind": "image", "url": url, "text": f'Image made for: "{r["q"][:80]}"'})
+        except Exception as e: return jsonify({"error": str(e)}), 502
 
     if r["k"] == "img":
         try:
             d = serper_images(r["q"], r["n"])
-            images = [{
-                "url":   x.get("imageUrl") or x.get("link"),
-                "thumb": x.get("thumbnailUrl") or x.get("imageUrl"),
-                "title": x.get("title") or "image",
-                "link":  x.get("link"),
-            } for x in (d.get("images") or [])[:r["n"]]]
-            return jsonify({
-                "kind": "images", "images": images,
-                "text": f'[Image results for "{r["q"]}"]',
-            })
-        except Exception as e:
-            return jsonify({"error": str(e)}), 502
+            images = [{"url": x.get("imageUrl") or x.get("link"), "thumb": x.get("thumbnailUrl") or x.get("imageUrl"), "title": x.get("title") or "image", "link": x.get("link")} for x in (d.get("images") or [])[:r["n"]]]
+            return jsonify({"kind": "images", "images": images, "text": f'[Image results for "{r["q"]}"]'})
+        except Exception as e: return jsonify({"error": str(e)}), 502
 
-    # AI path
     ctx, sources = "", []
     if r["k"] == "web":
         try:
             d = serper_search(r["q"])
             ctx = web_context(d)
             sources = [o.get("link") for o in (d.get("organic") or [])[:4]]
-        except Exception:
-            pass
+        except Exception: pass
 
-    messages = build_messages(
-        model_name,
-        history + [{"role": "user", "content": text or "Summarise this file."}],
-        ctx=ctx, attachment=attachment_text,
-    )
+    messages = build_messages(model_name, history + [{"role": "user", "content": text or "Summarise this file."}], ctx=ctx, attachment=attachment_text)
 
     def generate():
         yield sse({"type": "sources", "sources": sources})
-        # 1) Primary: Groq
         try:
             for tok in try_groq(model_name, messages):
                 yield sse({"type": "delta", "text": tok})
             yield sse({"type": "done"})
             return
-        except Exception as e:
-            print("Primary failed:", e)
+        except Exception as e: print("Primary failed:", e)
 
-        # 2) Backup: Gemini
         if BACKUP_KEYS:
-            contents = [{
-                "role": "user" if m["role"] == "user" else "model",
-                "parts": [{"text": m["content"]}],
-            } for m in messages[1:]]
+            contents = [{"role": "user" if m["role"] == "user" else "model", "parts": [{"text": m["content"]}]} for m in messages[1:]]
             start = int(time.time()) % len(BACKUP_KEYS)
             for i in range(min(len(BACKUP_KEYS), 6)):
                 try:
@@ -550,11 +395,8 @@ def chat():
                         yield sse({"type": "delta", "text": tok})
                     yield sse({"type": "done"})
                     return
-                except Exception as e:
-                    print("Gemini fallback:", e)
-                    continue
+                except Exception as e: print("Gemini fallback:", e)
 
-        # 3) Spare Groq key
         spare = GROQ_KEYS.get("spare", "")
         if spare:
             try:
@@ -562,98 +404,71 @@ def chat():
                     yield sse({"type": "delta", "text": tok})
                 yield sse({"type": "done"})
                 return
-            except Exception as e:
-                print("Spare failed:", e)
+            except Exception as e: print("Spare failed:", e)
 
-        yield sse({"type": "error",
-                   "error": "Couldn't get a response right now. Please tap Retry."})
+        yield sse({"type": "error", "error": "Couldn't get a response right now. Please tap Retry."})
 
     return app.response_class(generate(), mimetype="application/x-ndjson")
 
 # ------------------------------------------------------------------
-#  Speech-to-text (Groq Whisper)
+#  Speech-to-text
 # ------------------------------------------------------------------
 @app.route("/api/transcribe", methods=["POST"])
 @rate_guard
 def transcribe():
     key = GROQ_KEYS.get("audio") or GROQ_KEYS.get("spare")
-    if not key:
-        return jsonify({"error": "Voice input not configured"}), 503
+    if not key: return jsonify({"error": "Voice input not configured"}), 503
     f = request.files.get("file")
-    if not f:
-        return jsonify({"error": "No audio"}), 400
+    if not f: return jsonify({"error": "No audio"}), 400
     lang = request.form.get("language", "en")[:2]
     files = {"file": (f.filename or "voice.webm", f.read(), f.mimetype or "audio/webm")}
-    data  = {"model": WHISPER_MODEL, "language": lang}
-    r = requests.post(f"{GROQ_API}/audio/transcriptions",
-                      headers={"Authorization": f"Bearer {key}"},
-                      files=files, data=data, timeout=60)
-    if r.status_code != 200:
-        return jsonify({"error": err_text(r.text)}), 502
+    r = requests.post(f"{GROQ_API}/audio/transcriptions", headers={"Authorization": f"Bearer {key}"}, files=files, data={"model": WHISPER_MODEL, "language": lang}, timeout=60)
+    if r.status_code != 200: return jsonify({"error": err_text(r.text)}), 502
     return jsonify({"text": (r.json().get("text") or "").strip()})
 
 # ------------------------------------------------------------------
-#  File upload (image, PDF, ZIP, text/code)
+#  File upload
 # ------------------------------------------------------------------
-TEXT_EXT = re.compile(
-    r"\.(txt|md|json|csv|tsv|js|jsx|ts|tsx|py|html?|css|scss|java|kt|c|h|cpp|hpp|cs|go|rs|php|rb|sh|bat|ya?ml|xml|sql|swift|dart|lua|r|toml|ini|env|gradle|vue|svelte|log)$",
-    re.I,
-)
+TEXT_EXT = re.compile(r"\.(txt|md|json|csv|tsv|js|jsx|ts|tsx|py|html?|css|scss|java|kt|c|h|cpp|hpp|cs|go|rs|php|rb|sh|bat|ya?ml|xml|sql|swift|dart|lua|r|toml|ini|env|gradle|vue|svelte|log)$", re.I)
 
 @app.route("/api/upload", methods=["POST"])
 @rate_guard
 def upload():
     f = request.files.get("file")
-    if not f:
-        return jsonify({"error": "No file"}), 400
+    if not f: return jsonify({"error": "No file"}), 400
     raw = f.read()
-    if len(raw) > 12 * 1024 * 1024:
-        return jsonify({"error": "File too large (max 12 MB)"}), 413
+    if len(raw) > 12 * 1024 * 1024: return jsonify({"error": "File too large (max 12 MB)"}), 413
 
     name = f.filename or "file"
     mime = f.mimetype or ""
 
     try:
         if mime == "application/pdf" or name.lower().endswith(".pdf"):
-            return jsonify({"name": name, "mime": "application/pdf",
-                            "text": f"[PDF: {name}]",
-                            "base64": base64.b64encode(raw).decode()})
-
+            return jsonify({"name": name, "mime": "application/pdf", "text": f"[PDF: {name}]", "base64": base64.b64encode(raw).decode()})
         if mime.startswith("image/"):
-            return jsonify({"name": name, "mime": mime,
-                            "text": f"[Image: {name}]",
-                            "base64": base64.b64encode(raw).decode()})
-
+            return jsonify({"name": name, "mime": mime, "text": f"[Image: {name}]", "base64": base64.b64encode(raw).decode()})
         if name.lower().endswith(".zip") or "zip" in mime:
             zf = zipfile.ZipFile(io.BytesIO(raw))
             skip = re.compile(r"(^|/)(node_modules|\.git|dist|build|__pycache__|\.idea|\.vscode)/", re.I)
             names = [n for n in zf.namelist() if not n.endswith("/") and not skip.search(n)]
-            out = f"[ZIP: {name}, {len(names)} files]\nFile list:\n" + \
-                  "\n".join("- " + n for n in names[:300]) + "\n"
+            out = f"[ZIP: {name}, {len(names)} files]\nFile list:\n" + "\n".join("- " + n for n in names[:300]) + "\n"
             used = 0
             for n in names:
-                if not TEXT_EXT.search(n) or used > 70000:
-                    continue
+                if not TEXT_EXT.search(n) or used > 70000: continue
                 try:
                     txt = zf.read(n).decode("utf-8", "ignore")[:9000]
                     out += f"\n--- {n} ---\n{txt}\n"
                     used += len(txt)
-                except Exception:
-                    continue
+                except Exception: continue
             return jsonify({"name": name, "mime": "application/zip", "text": out})
-
         if TEXT_EXT.search(name) or mime.startswith("text/") or mime == "application/json":
             txt = raw.decode("utf-8", "ignore")[:60000]
-            return jsonify({"name": name, "mime": "text/plain",
-                            "text": f"[File: {name}]\n{txt}"})
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-    return jsonify({"error": "Unsupported file. Try an image, PDF, ZIP or text/code file."}), 415
+            return jsonify({"name": name, "mime": "text/plain", "text": f"[File: {name}]\n{txt}"})
+    except Exception as e: return jsonify({"error": str(e)}), 500
+    return jsonify({"error": "Unsupported file."}), 415
 
 # ------------------------------------------------------------------
-#  Frontend (single HTML page inlined)
+#  Frontend
 # ------------------------------------------------------------------
 INDEX_HTML = r"""<!DOCTYPE html>
 <html lang="en">
@@ -667,10 +482,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <meta property="og:image" content="/logo.png">
 <meta property="og:title" content="UB Chat">
 <meta property="og:description" content="Fast AI chat. Your chats stay on your device.">
+<!-- highlight.js for code visualization -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0}
-:root{color-scheme:light;--bg:#f5f6fa;--card:#fff;--tx:#141b34;--mu:#6b7280;--bd:#e6e8ef;--ac:#3b6cf6;--ac2:#ff6b00;--sh:0 2px 10px rgba(20,27,52,.06)}
-:root[data-theme=dark]{color-scheme:dark;--bg:#0f1115;--card:#181b22;--tx:#e8eaf0;--mu:#8b93a3;--bd:#262a33;--ac:#6c8cff;--ac2:#ff8c1a;--sh:none}
+:root{color-scheme:light;--bg:#f5f6fa;--card:#fff;--tx:#141b34;--mu:#6b7280;--bd:#e6e8ef;--ac:#3b6cf6;--ac2:#ff6b00;--sh:0 2px 10px rgba(20,27,52,.06);--code-bg:#1e1e2e}
+:root[data-theme=dark]{color-scheme:dark;--bg:#0f1115;--card:#181b22;--tx:#e8eaf0;--mu:#8b93a3;--bd:#262a33;--ac:#6c8cff;--ac2:#ff8c1a;--sh:none;--code-bg:#0d1117}
 html,body{height:100%}
 body{background:var(--bg);color:var(--tx);font:16px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden;display:flex;height:100%}
 button,select,textarea,input{font:inherit;color:inherit}
@@ -686,7 +504,7 @@ button{cursor:pointer;border:0;background:none}
 .ci span{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;padding:8px 0;cursor:pointer;font-size:15px}
 .ci button{color:var(--mu);padding:6px 9px;font-size:18px}
 #main{flex:1;display:flex;flex-direction:column;min-width:0}
-#top{display:flex;align-items:center;gap:8px;padding:10px 12px;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(10px)}
+#top{display:flex;align-items:center;gap:8px;padding:10px 12px;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(10px);z-index:10}
 #model{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:8px 12px;font-weight:700}
 #msgs{flex:1;overflow:auto;padding:4px 14px 20px}
 .w{max-width:780px;margin:0 auto}
@@ -697,23 +515,39 @@ button{cursor:pointer;border:0;background:none}
 .av img{width:100%;height:100%;object-fit:contain;padding:2px}
 .m.a .b{flex:1;min-width:0;overflow-wrap:anywhere}
 .b code{background:var(--bg);padding:1px 6px;border-radius:6px;font:.88em ui-monospace,monospace}
-.code{background:var(--card);border:1px solid var(--bd);border-radius:14px;margin:10px 0;overflow:hidden}
-.ch{display:flex;justify-content:space-between;padding:7px 14px;background:var(--bg);font-size:13px;color:var(--mu)}
-.code pre{padding:12px 14px;overflow-x:auto;font:13.5px/1.5 ui-monospace,monospace}
+.b a{color:var(--ac);text-decoration:none}
+.b a:hover{text-decoration:underline}
+
+/* BEAUTIFUL CODE BLOCK */
+.code{background:var(--code-bg);border-radius:14px;margin:12px 0;overflow:hidden;border:1px solid #333;box-shadow:0 4px 12px rgba(0,0,0,.2)}
+.ch{display:flex;justify-content:space-between;align-items:center;padding:8px 14px;background:#2d2d3f;color:#aaa;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+.ch span{display:flex;align-items:center;gap:6px}
+.ch .lang-dot{width:8px;height:8px;border-radius:50%;background:#f1fa8c}
+.ch .btns{display:flex;gap:8px}
+.ch button{color:#ccc;font-size:12px;padding:2px 8px;border-radius:6px;transition:background .15s}
+.ch button:hover{background:#444;color:#fff}
+.ch button.preview{color:#8be9fd}
+.ch button.preview:hover{background:#8be9fd;color:#000}
+.code pre{padding:14px 16px;overflow-x:auto;margin:0;font:13.5px/1.6 ui-monospace,Menlo,Consolas,monospace;color:#f8f8f2;background:var(--code-bg)}
+.code pre code{background:none;padding:0;font:inherit;color:inherit}
+
+/* IMAGE GRID */
 .card{background:var(--card);border-radius:16px;padding:14px 16px;box-shadow:var(--sh);margin:8px 0}
 .card .big{font-size:34px;font-weight:700}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin:8px 0}
-.gi{position:relative;border-radius:12px;overflow:hidden;background:var(--bd);display:block;color:inherit;text-decoration:none}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin:12px 0}
+.gi{position:relative;border-radius:14px;overflow:hidden;background:var(--bd);display:block;color:inherit;text-decoration:none;box-shadow:0 2px 6px rgba(0,0,0,.1);transition:transform .15s}
+.gi:hover{transform:scale(1.02)}
 .gi img{width:100%;aspect-ratio:1;object-fit:cover;display:block}
-.gi .ttl{display:block;padding:6px 8px;background:var(--card);font-size:11.5px}
-/* LINK GRID — 2 columns, favicon + title */
+.gi .ttl{display:block;padding:8px;background:var(--card);font-size:12px;line-height:1.3;max-height:44px;overflow:hidden}
+
+/* LINK GRID */
 .lgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:10px 0}
 .lcard{display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--card);border:1px solid var(--bd);border-radius:12px;text-decoration:none;color:inherit;min-width:0;transition:box-shadow .15s,transform .1s}
 .lcard:hover{box-shadow:var(--sh);transform:translateY(-1px)}
-.lcard:active{transform:scale(.99)}
 .lcard img{width:20px;height:20px;flex:none;border-radius:4px;background:var(--bg)}
-.lcard span{flex:1;min-width:0;font-size:13.5px;line-height:1.35;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word}
+.lcard span{flex:1;min-width:0;font-size:13.5px;line-height:1.35;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 .lcard small{display:block;color:var(--mu);font-size:11px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
 #bar{padding:4px 12px 12px}
 #box{max-width:780px;margin:0 auto;display:flex;align-items:flex-end;gap:8px;background:var(--card);border-radius:26px;padding:8px;box-shadow:0 4px 18px rgba(20,27,52,.1);border:1px solid var(--bd)}
 #in{flex:1;border:0;background:none;outline:0;resize:none;max-height:180px;padding:8px 0;line-height:1.5}
@@ -727,6 +561,16 @@ button{cursor:pointer;border:0;background:none}
 .chip{display:inline-block;background:var(--card);border:1px solid var(--bd);border-radius:20px;padding:6px 14px;font-size:14px;margin:4px 6px 4px 0}
 #toast{position:fixed;left:50%;bottom:96px;transform:translateX(-50%);background:var(--tx);color:var(--bg);padding:9px 16px;border-radius:12px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:60}
 #toast.on{opacity:1}
+
+/* PREVIEW MODAL */
+#preview{position:fixed;inset:0;background:rgba(0,0,0,.8);display:none;z-index:100;flex-direction:column}
+#preview.on{display:flex}
+#preview-bar{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:var(--card);border-bottom:1px solid var(--bd);color:var(--tx)}
+#preview-bar b{font-size:15px}
+#preview-bar button{color:var(--tx);font-size:14px;padding:6px 12px;border-radius:8px}
+#preview-bar button:hover{background:var(--bg)}
+#preview iframe{flex:1;border:0;background:#fff;width:100%;height:100%}
+
 @media(max-width:800px){#side{display:none}.m.a .b{font-size:16px}}
 @media(max-width:520px){.lgrid{grid-template-columns:1fr}}
 </style>
@@ -745,7 +589,7 @@ button{cursor:pointer;border:0;background:none}
   <div id="msgs"><div class="w" id="w"></div></div>
   <div id="bar">
     <div id="ab" style="max-width:780px;margin:0 auto"></div>
-    <input type="file" id="fi" hidden accept="image/*,application/pdf,.pdf,.zip,text/*,.md,.json,.csv,.js,.ts,.py,.html,.css">
+    <input type="file" id="fi" hidden accept="image/*,application/pdf,.pdf,.zip,text/*,.md,.json,.csv,.js,.ts,.py,.html,.css,.php">
     <div id="box">
       <button id="att" class="chip" style="padding:8px 10px;margin:0">📎</button>
       <textarea id="in" rows="1" placeholder="Ask UB Chat anything"></textarea>
@@ -755,12 +599,26 @@ button{cursor:pointer;border:0;background:none}
   </div>
 </section>
 <div id="toast"></div>
+
+<!-- PREVIEW MODAL -->
+<div id="preview">
+  <div id="preview-bar">
+    <b>Live Preview</b>
+    <div style="display:flex;gap:6px">
+      <button id="pv-reload">Reload</button>
+      <button id="pv-close" style="font-weight:700">Close ✕</button>
+    </div>
+  </div>
+  <iframe id="pv-frame" sandbox="allow-scripts allow-modals allow-forms allow-popups allow-same-origin"></iframe>
+</div>
+
 <script>
 const $=id=>document.getElementById(id);
 const LS={g(k,d){try{const v=JSON.parse(localStorage.getItem(k));return v==null?d:v}catch(e){return d}},s(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
 const E=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
 function toast(t){const el=$("toast");el.textContent=t;el.classList.add("on");clearTimeout(toast._t);toast._t=setTimeout(()=>el.classList.remove("on"),2500)}
+
 let chats=LS.g("ub_chats",[]),cur=null,busy=false,ctl=null,pend=null,rec=null;
 const MODELS=["UB Quick Flash 2.4","UB Flash 3.5","UB Flash 3.8"];
 MODELS.forEach(n=>$("model").add(new Option(n,n)));
@@ -769,12 +627,11 @@ $("model").onchange=()=>LS.s("ub_model",$("model").value);
 const getChat=()=>chats.find(c=>c.id===cur);
 const save=()=>LS.s("ub_chats",chats);
 
-/* ---------- URL detection + 2-col link grid ---------- */
+/* ---------- URL Grid ---------- */
 const URL_RE = /\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)|(https?:\/\/[^\s<>)"']+)/g;
 function linkGrid(raw){
   const seen = new Set(); const items = [];
-  let m;
-  URL_RE.lastIndex = 0;
+  let m; URL_RE.lastIndex = 0;
   while ((m = URL_RE.exec(raw)) !== null){
     const title = (m[1] || "").trim();
     const url   = (m[2] || m[3] || "").trim();
@@ -787,51 +644,162 @@ function linkGrid(raw){
   if (!items.length) return "";
   const cards = items.map(it => {
     const fav = "https://www.google.com/s2/favicons?domain=" + encodeURIComponent(it.domain) + "&sz=32";
-    return '<a class="lcard" href="'+E(it.url)+'" target="_blank" rel="noopener">'+
-           '<img src="'+fav+'" alt="" loading="lazy" onerror="this.style.display=\'none\'">'+
-           '<span>'+E(it.title)+'<small>'+E(it.domain)+'</small></span>'+
-           '</a>';
+    return '<a class="lcard" href="'+E(it.url)+'" target="_blank" rel="noopener"><img src="'+fav+'" alt="" loading="lazy" onerror="this.style.display=\'none\'"><span>'+E(it.title)+'<small>'+E(it.domain)+'</small></span></a>';
   }).join("");
   return '<div class="lgrid">'+cards+'</div>';
 }
 
+/* ---------- Markdown & Code Renderer ---------- */
 function md(t){
-  // Strip bare "Title](url)" patterns the model sometimes produces without the leading [
   t = t.replace(/^([A-Za-z0-9][^\n\]]{1,120})\]\((https?:\/\/[^)\s]+)\)/gm, "[$1]($2)");
   t = E(t);
-  t = t.replace(/```(\w*)\n?([\s\S]*?)```/g,(m,l,c)=>'<div class="code"><div class="ch"><span>'+l+'</span></div><pre>'+c+'</pre></div>');
-  t = t.replace(/`([^`\n]+)`/g,"<code>$1</code>");
-  // links FIRST (before bold), so url contents are untouched
-  t = t.replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g,
-                (m,txt,url)=>'<a href="'+url+'" target="_blank" rel="noopener">'+txt+'</a>');
+  
+  // Extract code blocks first
+  const codeBlocks = [];
+  t = t.replace(/```(\w*)\n?([\s\S]*?)```/g, (m, lang, code) => {
+    const idx = codeBlocks.length;
+    const l = lang || "code";
+    // Determine if this language can be previewed
+    const canPreview = ["html", "php", "css", "js", "javascript", "svg"].includes(l.toLowerCase());
+    const prevBtn = canPreview ? `<button class="preview" data-code-idx="${idx}" data-lang="${l}">Preview ▶</button>` : "";
+    
+    codeBlocks.push({ lang: l, code: code.trim() });
+    return `<div class="code" data-idx="${idx}"><div class="ch"><span><i class="lang-dot"></i> ${l}</span><div class="btns">${prevBtn}<button class="copy" data-code-idx="${idx}">Copy</button></div></div><pre><code class="language-${l}">${E(code.trim())}</code></pre></div>`;
+  });
+
+  // Links
+  t = t.replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, (m,txt,url)=>'<a href="'+url+'" target="_blank" rel="noopener">'+txt+'</a>');
+  
+  // Bold, Headers, Lists
   t = t.replace(/\*\*([^*\n]+)\*\*/g,"<b>$1</b>");
   t = t.replace(/^### (.*)$/gm,"<h4>$1</h4>").replace(/^#{1,2} (.*)$/gm,"<h3>$1</h3>");
   t = t.replace(/^(?:[-*] .*(?:\n|$))+/gm,m=>"<ul>"+m.trim().split("\n").map(x=>"<li>"+x.slice(2)+"</li>").join("")+"</ul>");
   t = t.replace(/\n{2,}/g,"<br><br>").replace(/\n/g,"<br>");
+
+  // Re-inject code blocks (using placeholders so we don't re-escape)
+  let blockPlaceholder = 0;
+  t = t.replace(/@@CODE_BLOCK_(\d+)@@/g, (m, idx) => `<div class="code" data-idx="${idx}"><div class="ch"><span><i class="lang-dot"></i> ${codeBlocks[idx].lang}</span><div class="btns">${["html","php","css","js","javascript","svg"].includes(codeBlocks[idx].lang.toLowerCase()) ? `<button class="preview" data-code-idx="${idx}" data-lang="${codeBlocks[idx].lang}">Preview ▶</button>` : ""}<button class="copy" data-code-idx="${idx}">Copy</button></div></div><pre><code class="language-${codeBlocks[idx].lang}">${E(codeBlocks[idx].code)}</code></pre></div>`);
+  
+  // Highlight
+  setTimeout(() => { if(window.hljs) document.querySelectorAll('.code code').forEach(el => hljs.highlightElement(el)); }, 10);
+
   return t;
 }
+
+// Because md() modifies the text, we need to store code blocks globally so preview can access them.
+window.__codeBlocks = [];
+// Override md to store globally
+const originalMd = md;
+md = function(t) {
+  window.__codeBlocks = []; // reset
+  // We need to inject placeholders for code blocks before E() escapes them
+  t = t.replace(/^([A-Za-z0-9][^\n\]]{1,120})\]\((https?:\/\/[^)\s]+)\)/gm, "[$1]($2)");
+  const escaped = E(t);
+  
+  const blocks = [];
+  // Temporarily replace code blocks with placeholders
+  const withPlaceholders = escaped.replace(/```(\w*)\n?([\s\S]*?)```/g, (m, lang, code) => {
+    const idx = blocks.length;
+    blocks.push({ lang: lang || "code", code: code.trim() });
+    window.__codeBlocks.push({ lang: lang || "code", code: code.trim() });
+    return `\n\n@@CODE_BLOCK_${idx}@@\n\n`;
+  });
+  
+  // Now do markdown on the text without code
+  let html = withPlaceholders
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, (m,txt,url)=>'<a href="'+url+'" target="_blank" rel="noopener">'+txt+'</a>')
+    .replace(/\*\*([^*\n]+)\*\*/g,"<b>$1</b>")
+    .replace(/^### (.*)$/gm,"<h4>$1</h4>")
+    .replace(/^#{1,2} (.*)$/gm,"<h3>$1</h3>")
+    .replace(/^(?:[-*] .*(?:\n|$))+/gm,m=>"<ul>"+m.trim().split("\n").map(x=>"<li>"+x.slice(2)+"</li>").join("")+"</ul>")
+    .replace(/\n{2,}/g,"<br><br>").replace(/\n/g,"<br>");
+
+  // Replace placeholders with actual code blocks
+  html = html.replace(/@@CODE_BLOCK_(\d+)@@/g, (m, idx) => {
+    const b = blocks[idx];
+    const canPreview = ["html", "php", "css", "js", "javascript", "svg"].includes(b.lang.toLowerCase());
+    return `<div class="code" data-idx="${idx}"><div class="ch"><span><i class="lang-dot"></i> ${b.lang}</span><div class="btns">${canPreview ? `<button class="preview" data-code-idx="${idx}" data-lang="${b.lang}">Preview ▶</button>` : ""}<button class="copy" data-code-idx="${idx}">Copy</button></div></div><pre><code class="language-${b.lang}">${E(b.code)}</code></pre></div>`;
+  });
+
+  setTimeout(() => { if(window.hljs) document.querySelectorAll('.code code').forEach(el => hljs.highlightElement(el)); }, 10);
+
+  return html;
+};
 
 function bubble(m){
   if(m.role==="user")return '<div class="m u"><div class="b">'+E(m.content)+"</div></div>";
   let body;
-  if (m.err){
+  if(m.err){
     body = '<span style="color:#e0453b">'+E(m.content)+"</span>";
-  } else if (m.content && (m.content.startsWith("![") || m.content.startsWith("[") || m.content.startsWith("Title]")) && (m.content.includes("](http") || m.content.match(/\]\(https?:/))) {
-    // If the whole reply is just a list of links/urls → show grid of 2 + text
-    const grid = linkGrid(m.content);
-    if (grid) {
-      // Keep any text lines that aren't pure link lines
-      const leftover = m.content.split("\n").filter(l=>!/^\[?[^\]]*\]?\(https?:\/\/[^)]+\)\s*$/.test(l) && !/^https?:\/\/\S+$/.test(l)).join("\n").trim();
-      body = (leftover ? md(leftover) : "") + grid;
-    } else {
-      body = md(m.content);
-    }
   } else {
-    body = md(m.content||"") + (m.content ? linkGrid(m.content) : "");
+    const html = md(m.content||"");
+    const grid = linkGrid(m.content||"");
+    body = html + grid;
   }
   return '<div class="m a"><i class="av"><img src="/logo.png" alt="UB"></i><div class="b">'+body+"</div></div>";
 }
 
+/* ---------- Preview Modal ---------- */
+$("pv-close").onclick = () => $("preview").classList.remove("on");
+$("pv-reload").onclick = () => { const f = $("pv-frame"); f.src = f.src; };
+
+document.addEventListener("click", e => {
+  // Copy button
+  if (e.target.classList.contains("copy")) {
+    const idx = e.target.dataset.codeIdx;
+    const block = window.__codeBlocks[idx];
+    if (block) {
+      navigator.clipboard.writeText(block.code).then(() => {
+        e.target.textContent = "Copied!";
+        setTimeout(() => e.target.textContent = "Copy", 1500);
+      }).catch(() => toast("Copy failed"));
+    }
+  }
+
+  // Preview button
+  if (e.target.classList.contains("preview")) {
+    const idx = e.target.dataset.codeIdx;
+    const lang = (e.target.dataset.lang || "").toLowerCase();
+    const block = window.__codeBlocks[idx];
+    if (!block) return;
+
+    let htmlContent = "";
+    const code = block.code;
+
+    if (lang === "html" || lang === "svg") {
+      htmlContent = code;
+    } else if (lang === "css") {
+      htmlContent = `<!DOCTYPE html><html><head><style>${code}</style></head><body><div style="padding:20px;font-family:sans-serif"><h2>CSS Preview</h2><p class="demo">This is a demo paragraph to show your CSS styles. Try adding elements like <code>&lt;h1&gt;</code>, <code>&lt;p&gt;</code>, <code>&lt;button&gt;</code> in your CSS.</p><button class="btn">Click Me</button><div class="card"><h3>Card Title</h3><p>Card content here.</p></div></div></body></html>`;
+    } else if (lang === "js" || lang === "javascript") {
+      htmlContent = `<!DOCTYPE html><html><head><style>body{font-family:sans-serif;padding:20px}</style></head><body><h2>JS Preview</h2><div id="output">Check console for logs...</div><pre id="console" style="background:#111;color:#0f0;padding:10px;border-radius:8px;min-height:100px;font-size:12px;overflow:auto"></pre><script>
+        // Redirect console.log to the page
+        const log = (...args) => { document.getElementById('console').textContent += args.map(a=>JSON.stringify(a)).join(' ') + '\\n'; };
+        console.log = log; console.error = log; console.warn = log;
+        try {
+          ${code}
+        } catch(e) { log('ERROR:', e.message); }
+      </script></body></html>`;
+    } else if (lang === "php") {
+      // Client-side PHP preview:
+      // We strip PHP tags and try to render whatever HTML is left.
+      // We also handle simple echo statements.
+      let preview = code;
+      // Replace simple <?php echo "text"; ?> with text
+      preview = preview.replace(/<\?php\s*echo\s+["']([^"']+)["']\s*;?\s*\?>/g, "$1");
+      // Remove remaining PHP code (keep HTML)
+      preview = preview.replace(/<\?php[\s\S]*?\?>/g, "<!-- PHP code executed server-side -->");
+      preview = preview.replace(/<\?[\s\S]*?\?>/g, "");
+      
+      htmlContent = `<!DOCTYPE html><html><head><style>body{font-family:sans-serif;padding:20px;background:#f9f9f9} .note{background:#fff3cd;border:1px solid #ffc107;padding:10px;border-radius:8px;margin-bottom:20px;font-size:13px;color:#856404}</style></head><body><div class="note">⚠️ PHP Preview (Client-side). Server-side logic (database, sessions) won't run. Only HTML/CSS output is visible.</div>${preview}</body></html>`;
+    }
+
+    const frame = $("pv-frame");
+    frame.srcdoc = htmlContent;
+    $("preview").classList.add("on");
+  }
+});
+
+/* ---------- Chat Logic ---------- */
 function render(){
   const c=getChat();
   if(!c||!c.msgs.length){
@@ -941,24 +909,18 @@ render();
 
 @app.route("/")
 def index():
-    # Bypass Jinja entirely — INDEX_HTML contains CSS like `{#side{...}}`
-    # which Jinja misinterprets as an unclosed comment tag.
     return Response(INDEX_HTML, mimetype="text/html")
 
-# Logo — serves ./logo.png
 @app.route("/logo.png")
 def logo():
     return send_from_directory(".", "logo.png", mimetype="image/png")
 
-# Health / UptimeRobot ping
 @app.route("/health")
 def health():
     return jsonify({
-        "ok": True,
-        "time": now_str(),
+        "ok": True, "time": now_str(),
         "groq_keys": sum(1 for v in GROQ_KEYS.values() if v),
-        "backup_keys": len(BACKUP_KEYS),
-        "search_keys": len(SEARCH_KEYS),
+        "backup_keys": len(BACKUP_KEYS), "search_keys": len(SEARCH_KEYS),
         "rate_limit": f"{RATE_LIMIT_PER_MIN}/min per IP",
     })
 
