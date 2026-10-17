@@ -18,7 +18,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 import requests
-from flask import Flask, request, jsonify, render_template_string, send_from_directory
+from flask import Flask, request, jsonify, Response, send_from_directory
 
 # ------------------------------------------------------------------
 #  CONFIG (from environment — nothing secret is hard-coded)
@@ -852,8 +852,8 @@ async function send(txt){
       const j=await r.json();
       if(j.kind==="weather")m.content="🌤️ "+j.data.name+"\n\n**"+j.data.t+"°C** — "+j.data.s+"\nWind "+j.data.w+" km/h";
       else if(j.kind==="crypto")m.content=j.data.map(p=>"**"+p.name+"** — ₹"+p.inr+" / $"+p.usd+(p.chg!=null?" ("+p.chg.toFixed(1)+"%)":"")).join("\n");
-      else if(j.kind==="image")m.content='<img src="'+j.url+'" style="max-width:100%;border-radius:12px">\n\n'+j.text;
-      else if(j.kind==="images")m.content='<div class="grid">'+j.images.map(x=>'<a class="gi" href="'+x.link+'" target="_blank"><img src="'+x.thumb+'" loading="lazy"><span class="ttl">'+E(x.title)+"</span></a>").join("")+"</div>";
+      else if(j.kind==="image")m.content="![Made image]("+j.url+")\n\n"+j.text;
+      else if(j.kind==="images")m.content=j.images.map(x=>"- ["+x.title+"]("+x.link+")").join("\n");
       else m.content=j.text||"";
       render();busy=false;setGo();save();return;
     }
@@ -882,7 +882,9 @@ render();
 
 @app.route("/")
 def index():
-    return render_template_string(INDEX_HTML)
+    # Bypass Jinja entirely — INDEX_HTML contains CSS like `{#side{...}}`
+    # which Jinja misinterprets as an unclosed comment tag.
+    return Response(INDEX_HTML, mimetype="text/html")
 
 # Logo — serves ./logo.png
 @app.route("/logo.png")
