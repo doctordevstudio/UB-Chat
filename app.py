@@ -706,6 +706,14 @@ button{cursor:pointer;border:0;background:none}
 .gi{position:relative;border-radius:12px;overflow:hidden;background:var(--bd);display:block;color:inherit;text-decoration:none}
 .gi img{width:100%;aspect-ratio:1;object-fit:cover;display:block}
 .gi .ttl{display:block;padding:6px 8px;background:var(--card);font-size:11.5px}
+/* LINK GRID — 2 columns, favicon + title */
+.lgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:10px 0}
+.lcard{display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--card);border:1px solid var(--bd);border-radius:12px;text-decoration:none;color:inherit;min-width:0;transition:box-shadow .15s,transform .1s}
+.lcard:hover{box-shadow:var(--sh);transform:translateY(-1px)}
+.lcard:active{transform:scale(.99)}
+.lcard img{width:20px;height:20px;flex:none;border-radius:4px;background:var(--bg)}
+.lcard span{flex:1;min-width:0;font-size:13.5px;line-height:1.35;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word}
+.lcard small{display:block;color:var(--mu);font-size:11px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #bar{padding:4px 12px 12px}
 #box{max-width:780px;margin:0 auto;display:flex;align-items:flex-end;gap:8px;background:var(--card);border-radius:26px;padding:8px;box-shadow:0 4px 18px rgba(20,27,52,.1);border:1px solid var(--bd)}
 #in{flex:1;border:0;background:none;outline:0;resize:none;max-height:180px;padding:8px 0;line-height:1.5}
@@ -720,6 +728,7 @@ button{cursor:pointer;border:0;background:none}
 #toast{position:fixed;left:50%;bottom:96px;transform:translateX(-50%);background:var(--tx);color:var(--bg);padding:9px 16px;border-radius:12px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:60}
 #toast.on{opacity:1}
 @media(max-width:800px){#side{display:none}.m.a .b{font-size:16px}}
+@media(max-width:520px){.lgrid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -759,20 +768,70 @@ $("model").value=LS.g("ub_model",MODELS[1]);
 $("model").onchange=()=>LS.s("ub_model",$("model").value);
 const getChat=()=>chats.find(c=>c.id===cur);
 const save=()=>LS.s("ub_chats",chats);
+
+/* ---------- URL detection + 2-col link grid ---------- */
+const URL_RE = /\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)|(https?:\/\/[^\s<>)"']+)/g;
+function linkGrid(raw){
+  const seen = new Set(); const items = [];
+  let m;
+  URL_RE.lastIndex = 0;
+  while ((m = URL_RE.exec(raw)) !== null){
+    const title = (m[1] || "").trim();
+    const url   = (m[2] || m[3] || "").trim();
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    let domain = "";
+    try { domain = new URL(url).hostname.replace(/^www\./, ""); } catch(e){}
+    items.push({title: title || domain || url, url, domain});
+  }
+  if (!items.length) return "";
+  const cards = items.map(it => {
+    const fav = "https://www.google.com/s2/favicons?domain=" + encodeURIComponent(it.domain) + "&sz=32";
+    return '<a class="lcard" href="'+E(it.url)+'" target="_blank" rel="noopener">'+
+           '<img src="'+fav+'" alt="" loading="lazy" onerror="this.style.display=\'none\'">'+
+           '<span>'+E(it.title)+'<small>'+E(it.domain)+'</small></span>'+
+           '</a>';
+  }).join("");
+  return '<div class="lgrid">'+cards+'</div>';
+}
+
 function md(t){
-  t=E(t);
-  t=t.replace(/```(\w*)\n?([\s\S]*?)```/g,(m,l,c)=>'<div class="code"><div class="ch"><span>'+l+'</span></div><pre>'+c+'</pre></div>');
-  t=t.replace(/`([^`\n]+)`/g,"<code>$1</code>").replace(/\*\*([^*\n]+)\*\*/g,"<b>$1</b>");
-  t=t.replace(/^### (.*)$/gm,"<h4>$1</h4>").replace(/^#{1,2} (.*)$/gm,"<h3>$1</h3>");
-  t=t.replace(/^(?:[-*] .*(?:\n|$))+/gm,m=>"<ul>"+m.trim().split("\n").map(x=>"<li>"+x.slice(2)+"</li>").join("")+"</ul>");
-  t=t.replace(/\n{2,}/g,"<br><br>").replace(/\n/g,"<br>");
+  // Strip bare "Title](url)" patterns the model sometimes produces without the leading [
+  t = t.replace(/^([A-Za-z0-9][^\n\]]{1,120})\]\((https?:\/\/[^)\s]+)\)/gm, "[$1]($2)");
+  t = E(t);
+  t = t.replace(/```(\w*)\n?([\s\S]*?)```/g,(m,l,c)=>'<div class="code"><div class="ch"><span>'+l+'</span></div><pre>'+c+'</pre></div>');
+  t = t.replace(/`([^`\n]+)`/g,"<code>$1</code>");
+  // links FIRST (before bold), so url contents are untouched
+  t = t.replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g,
+                (m,txt,url)=>'<a href="'+url+'" target="_blank" rel="noopener">'+txt+'</a>');
+  t = t.replace(/\*\*([^*\n]+)\*\*/g,"<b>$1</b>");
+  t = t.replace(/^### (.*)$/gm,"<h4>$1</h4>").replace(/^#{1,2} (.*)$/gm,"<h3>$1</h3>");
+  t = t.replace(/^(?:[-*] .*(?:\n|$))+/gm,m=>"<ul>"+m.trim().split("\n").map(x=>"<li>"+x.slice(2)+"</li>").join("")+"</ul>");
+  t = t.replace(/\n{2,}/g,"<br><br>").replace(/\n/g,"<br>");
   return t;
 }
+
 function bubble(m){
   if(m.role==="user")return '<div class="m u"><div class="b">'+E(m.content)+"</div></div>";
-  const body=m.err?'<span style="color:#e0453b">'+E(m.content)+"</span>":md(m.content||"");
+  let body;
+  if (m.err){
+    body = '<span style="color:#e0453b">'+E(m.content)+"</span>";
+  } else if (m.content && (m.content.startsWith("![") || m.content.startsWith("[") || m.content.startsWith("Title]")) && (m.content.includes("](http") || m.content.match(/\]\(https?:/))) {
+    // If the whole reply is just a list of links/urls → show grid of 2 + text
+    const grid = linkGrid(m.content);
+    if (grid) {
+      // Keep any text lines that aren't pure link lines
+      const leftover = m.content.split("\n").filter(l=>!/^\[?[^\]]*\]?\(https?:\/\/[^)]+\)\s*$/.test(l) && !/^https?:\/\/\S+$/.test(l)).join("\n").trim();
+      body = (leftover ? md(leftover) : "") + grid;
+    } else {
+      body = md(m.content);
+    }
+  } else {
+    body = md(m.content||"") + (m.content ? linkGrid(m.content) : "");
+  }
   return '<div class="m a"><i class="av"><img src="/logo.png" alt="UB"></i><div class="b">'+body+"</div></div>";
 }
+
 function render(){
   const c=getChat();
   if(!c||!c.msgs.length){
